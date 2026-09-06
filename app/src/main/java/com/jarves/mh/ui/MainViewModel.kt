@@ -138,6 +138,8 @@ data class AppUiState(
     val projectTerminalDraft: String? = null,
     val pendingTerminalCommand: String? = null,
     val suggestedProjectRoot: String? = null,
+    val terminalSessions: List<String> = listOf("T1"),
+    val activeTerminalSession: String = "T1",
     val selectedDevStacks: Set<DevStack> = emptySet(),
     val installedDevStacks: Set<DevStack> = emptySet(),
     val devStackInstalling: DevStack? = null,
@@ -448,6 +450,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_state.value.projectTerminalRunning) return
         _state.update { it.copy(projectTerminalLines = emptyList(), projectTerminalLiveOutput = "") }
         saveProjectTerminal(project.id, _state.value.projectTerminalCwd, emptyList())
+    }
+
+    fun selectTerminalSession(sessionTitle: String) {
+        if (_state.value.terminalSessions.contains(sessionTitle)) {
+            _state.update { it.copy(activeTerminalSession = sessionTitle) }
+        }
+    }
+
+    fun newTerminalSession() {
+        val currentSessions = _state.value.terminalSessions
+        val nextNumber = (currentSessions.mapNotNull { it.removePrefix("T").toIntOrNull() }.maxOrNull() ?: 1) + 1
+        val newTitle = "T$nextNumber"
+        _state.update {
+            it.copy(
+                terminalSessions = it.terminalSessions + newTitle,
+                activeTerminalSession = newTitle,
+            )
+        }
     }
 
     private fun runProjectTerminalProcess(projectId: String, command: String, cwd: String): ProjectTerminalResult {

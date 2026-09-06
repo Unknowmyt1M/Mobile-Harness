@@ -18,6 +18,8 @@ import com.jarves.mh.runtime.PermissionManager
 import com.jarves.mh.runtime.QuestionManager
 import com.jarves.mh.runtime.RuntimeInstaller
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -390,7 +392,58 @@ class AskQuestionTool(
             resolutionPolicy = ResolutionPolicy.USER_REQUIRED,
         )
 
-        ToolExecutionResult(true, "Question submitted to user: $question")
+        // Write bridge request file so QuestionManager picks it up and renders global UI dialog
+        val bridgeDir = questionManager.bridgeDir
+        val reqFile = File(bridgeDir, "$qId.request")
+        val respFile = File(bridgeDir, "$qId.response")
+        reqFile.writeText(agentQ.toJson().toString())
+
+        // Suspend/poll waiting for response file
+        val timeoutMs = 600_000L // 10 minutes maximum wait
+        val startTime = System.currentTimeMillis()
+
+        while (isActive && System.currentTimeMillis() - startTime < timeoutMs) {
+            if (respFile.exists() && respFile.length() > 0) {
+                val rawResp = runCatching { respFile.readText().trim() }.getOrDefault("")
+                respFile.delete()
+                reqFile.delete()
+
+                val answerJson = runCatching { JSONObject(rawResp) }.getOrNull()
+                if (answerJson != null && answerJson.optBoolean("cancelled", false)) {
+                    return@withContext ToolExecutionResult(
+                        success = false,
+                        output = "",
+                        error = "Question was cancelled by the user",
+                    )
+                }
+
+                val answer = answerJson?.let { AgentAnswer.fromJson(it) }
+                val chosenText = when {
+                    answer == null -> rawResp
+                    answer.isCustom -> answer.textValue ?: ""
+                    !answer.textValue.isNullOrBlank() -> answer.textValue
+                    answer.selectedOptionIds.isNotEmpty() -> {
+                        val labels = optionsList.filter { it.id in answer.selectedOptionIds }.map { it.label }
+                        if (labels.isNotEmpty()) labels.joinToString(", ") else answer.selectedOptionIds.joinToString(", ")
+                    }
+                    else -> "User confirmed without selection"
+                }
+
+                return@withContext ToolExecutionResult(
+                    success = true,
+                    output = "User response: $chosenText",
+                )
+            }
+            delay(100)
+        }
+
+        reqFile.delete()
+        respFile.delete()
+        ToolExecutionResult(
+            success = false,
+            output = "",
+            error = "Question timed out after waiting for user input",
+        )
     }
 }
 
@@ -424,10 +477,49 @@ class RequestPermissionTool(
         val command = arguments.optString("command").takeIf { it.isNotBlank() }
         val reqId = "p_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
 
+        // Write bridge request file so PermissionManager detects it and triggers the UI permission prompt
+        val bridgeDir = permissionManager.bridgeDir
+        val reqFile = File(bridgeDir, "$reqId.request")
+        val respFile = File(bridgeDir, "$reqId.response")
+
+        val reqJson = JSONObject().apply {
+            put("approvalId", reqId)
+            put("tool_name", "request_permission")
+            put("explanation", explanation)
+            put("capability", cap?.identifier ?: capStr)
+            command?.let { put("command", it) }
+            projectId?.let { put("projectId", it) }
+        }
+        reqFile.writeText(reqJson.toString())
+
+        // Suspend/poll waiting for response file written by PermissionManager.respond()
+        val timeoutMs = 600_000L // 10 minutes wait
+        val startTime = System.currentTimeMillis()
+
+        while (isActive && System.currentTimeMillis() - startTime < timeoutMs) {
+            if (respFile.exists() && respFile.length() > 0) {
+                val decision = runCatching { respFile.readText().trim().lowercase() }.getOrDefault("deny")
+                respFile.delete()
+                reqFile.delete()
+
+                val granted = decision == "allow"
+                return@withContext ToolExecutionResult(
+                    success = granted,
+                    output = if (granted) "Permission granted by user for $capStr ($explanation)" else "",
+                    error = if (!granted) "Permission denied by user for $capStr" else null,
+                    isPermissionRequired = !granted,
+                    permissionRequestId = reqId,
+                )
+            }
+            delay(100)
+        }
+
+        reqFile.delete()
+        respFile.delete()
         ToolExecutionResult(
             success = false,
             output = "",
-            error = "Permission requested: $explanation",
+            error = "Permission request timed out waiting for user response",
             isPermissionRequired = true,
             permissionRequestId = reqId,
         )

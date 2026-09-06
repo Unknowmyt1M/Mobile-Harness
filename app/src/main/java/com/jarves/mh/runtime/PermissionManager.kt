@@ -22,7 +22,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.coroutineContext
 
 class PermissionManager(
-    private val bridgeDir: File,
+    val bridgeDir: File,
     private val taskStore: AgentTaskStore,
     private val onEvent: suspend (RuntimeEvent) -> Unit,
 ) {

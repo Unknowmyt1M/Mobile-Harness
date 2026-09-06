@@ -1,4 +1,4 @@
-﻿package com.jarves.mh.runtime
+package com.jarves.mh.runtime
 
 import android.content.Context
 import android.util.Log
@@ -105,163 +105,178 @@ class NativeModelAgentRuntime(
         _events.emit(RuntimeEvent.SessionStarted(sessionId))
         val workspace = File(context.filesDir, "workspaces/$projectId").apply { mkdirs() }
 
-        // Capture initial checkpoint before executing actions
-        checkpointManager.createCheckpoint(
-            projectId = projectId,
-            workspace = workspace,
-        )
+        // Start watching for bridge requests (permission and questions)
+        val permissionWatcher = scope.launch {
+            permissionManager.watchRequests(sessionId = sessionId, taskId = sessionId, projectId = projectId)
+        }
+        val questionWatcher = scope.launch {
+            questionManager.watchQuestions(sessionId = sessionId, taskId = sessionId)
+        }
 
-        val messages = JSONArray()
-        // 1. System instruction
-        val systemPrompt = """
-            You are Mobile Harness, an expert autonomous mobile software engineering agent.
-            You are working in an Ubuntu 20.04 ARM64 environment inside the project directory: /workspace/$projectSlug
-            You have access to tools to inspect files, edit code, execute bash commands, ask the user questions, and request permissions.
-            Be concise, direct, and verify your changes carefully.
-        """.trimIndent()
-        messages.put(JSONObject().apply {
-            put("role", "system")
-            put("content", systemPrompt)
-        })
+        try {
+            // Capture initial checkpoint before executing actions
+            checkpointManager.createCheckpoint(
+                projectId = projectId,
+                workspace = workspace,
+            )
 
-        // 2. Add history (bounded to last 10 messages for context budget)
-        conversationHistory.takeLast(10).forEach { msg ->
+            val messages = JSONArray()
+            // 1. System instruction
+            val systemPrompt = """
+                You are Mobile Harness, an expert autonomous mobile software engineering agent.
+                You are working in an Ubuntu 20.04 ARM64 environment inside the project directory: /workspace/$projectSlug
+                You have access to tools to inspect files, edit code, execute bash commands, ask the user questions, and request permissions.
+                Be concise, direct, and verify your changes carefully.
+            """.trimIndent()
             messages.put(JSONObject().apply {
-                put("role", if (msg.fromUser) "user" else "assistant")
-                put("content", msg.text)
+                put("role", "system")
+                put("content", systemPrompt)
             })
-        }
 
-        // 3. Add current user prompt
-        messages.put(JSONObject().apply {
-            put("role", "user")
-            put("content", prompt)
-        })
-
-        val adapter: ModelProtocolAdapter = when (provider.activeProtocol) {
-            ProviderProtocol.OPENAI_RESPONSES -> responsesAdapter
-            else -> chatAdapter
-        }
-
-        var turnCount = 0
-        val maxTurns = 20
-        var continueLoop = true
-
-        while (continueLoop && turnCount < maxTurns && activeSessionId == sessionId) {
-            turnCount++
-            var assistantReplyText = StringBuilder()
-            val toolCallsMap = mutableMapOf<Int, OpenAIStreamingParser.ToolCallAccumulator>()
-
-            runCatching {
-                adapter.streamTurn(
-                    provider = provider,
-                    apiKey = apiKey,
-                    messages = messages,
-                    toolRegistry = toolRegistry,
-                ).collect { chunk ->
-                    when (chunk) {
-                        is ParsedStreamChunk.TextDelta -> {
-                            assistantReplyText.append(chunk.text)
-                            _events.emit(RuntimeEvent.AssistantDelta(sessionId, chunk.text))
-                        }
-                        is ParsedStreamChunk.ReasoningDelta -> {
-                            _events.emit(RuntimeEvent.ReasoningProgress(sessionId, chunk.text.length / 4))
-                        }
-                        is ParsedStreamChunk.ToolCallDelta -> {
-                            val accum = toolCallsMap.getOrPut(chunk.index) {
-                                OpenAIStreamingParser.ToolCallAccumulator()
-                            }
-                            chunk.id?.let { accum.id = it }
-                            chunk.name?.let { accum.name = it }
-                            chunk.argumentsDelta?.let { accum.arguments.append(it) }
-                        }
-                        is ParsedStreamChunk.Completed -> {
-                            // Turn finished streaming
-                        }
-                    }
-                }
-            }.onFailure { error ->
-                Log.e("NativeAgentRuntime", "Streaming error during turn $turnCount", error)
-                _events.emit(RuntimeEvent.SessionFailed(sessionId, error.message ?: "Unknown error"))
-                continueLoop = false
-                return@withContext
-            }
-
-            val assistantMsg = JSONObject().apply {
-                put("role", "assistant")
-                if (assistantReplyText.isNotEmpty()) {
-                    put("content", assistantReplyText.toString())
-                }
-                if (toolCallsMap.isNotEmpty()) {
-                    val tcArray = JSONArray()
-                    toolCallsMap.toSortedMap().values.forEach { tc ->
-                        tcArray.put(JSONObject().apply {
-                            put("id", tc.id.ifBlank { "call_${UUID.randomUUID()}" })
-                            put("type", "function")
-                            put("function", JSONObject().apply {
-                                put("name", tc.name)
-                                put("arguments", tc.arguments.toString())
-                            })
-                        })
-                    }
-                    put("tool_calls", tcArray)
-                }
-            }
-            messages.put(assistantMsg)
-
-            // If no tools were called, the agent concluded its answer
-            if (toolCallsMap.isEmpty()) {
-                continueLoop = false
-                break
-            }
-
-            // Execute called tools sequentially
-            for ((_, tc) in toolCallsMap.toSortedMap()) {
-                val toolName = tc.name
-                val rawArgs = tc.arguments.toString()
-                _events.emit(RuntimeEvent.ToolStarted(sessionId, toolName, rawArgs.take(80)))
-
-                val tool = toolRegistry.getTool(toolName)
-                val toolOutput: String = if (tool == null) {
-                    "Error: Unknown tool '$toolName'"
-                } else {
-                    val argsJson = runCatching { JSONObject(rawArgs) }.getOrElse { JSONObject() }
-                    val result = tool.execute(sessionId, projectId, argsJson)
-                    if (result.isPermissionRequired) {
-                        _events.emit(
-                            RuntimeEvent.RuntimeLog(
-                                sessionId,
-                                "Permission required",
-                                "Action paused awaiting user decision",
-                            )
-                        )
-                    }
-                    if (result.success) {
-                        result.output
-                    } else {
-                        result.error ?: result.output
-                    }
-                }
-
-                _events.emit(RuntimeEvent.ToolCompleted(sessionId, toolName, toolOutput.take(120)))
-
-                // Add tool result message
+            // 2. Add history (bounded to last 10 messages for context budget)
+            conversationHistory.takeLast(10).forEach { msg ->
                 messages.put(JSONObject().apply {
-                    put("role", "tool")
-                    put("tool_call_id", tc.id)
-                    put("name", toolName)
-                    put("content", toolOutput)
+                    put("role", if (msg.fromUser) "user" else "assistant")
+                    put("content", msg.text)
                 })
             }
-        }
 
-        val pending = checkpointManager.loadPendingChanges(projectId, workspace)
-        if (pending.isNotEmpty()) {
-            _events.emit(RuntimeEvent.FilesChanged(sessionId, pending))
-        }
+            // 3. Add current user prompt
+            messages.put(JSONObject().apply {
+                put("role", "user")
+                put("content", prompt)
+            })
 
-        _events.emit(RuntimeEvent.SessionCompleted(sessionId))
-        activeSessionId = null
+            val adapter: ModelProtocolAdapter = when (provider.activeProtocol) {
+                ProviderProtocol.OPENAI_RESPONSES -> responsesAdapter
+                else -> chatAdapter
+            }
+
+            var turnCount = 0
+            val maxTurns = 20
+            var continueLoop = true
+
+            while (continueLoop && turnCount < maxTurns && activeSessionId == sessionId) {
+                turnCount++
+                var assistantReplyText = StringBuilder()
+                val toolCallsMap = mutableMapOf<Int, OpenAIStreamingParser.ToolCallAccumulator>()
+
+                runCatching {
+                    adapter.streamTurn(
+                        provider = provider,
+                        apiKey = apiKey,
+                        messages = messages,
+                        toolRegistry = toolRegistry,
+                    ).collect { chunk ->
+                        when (chunk) {
+                            is ParsedStreamChunk.TextDelta -> {
+                                assistantReplyText.append(chunk.text)
+                                _events.emit(RuntimeEvent.AssistantDelta(sessionId, chunk.text))
+                            }
+                            is ParsedStreamChunk.ReasoningDelta -> {
+                                _events.emit(RuntimeEvent.ReasoningProgress(sessionId, chunk.text.length / 4))
+                            }
+                            is ParsedStreamChunk.ToolCallDelta -> {
+                                val accum = toolCallsMap.getOrPut(chunk.index) {
+                                    OpenAIStreamingParser.ToolCallAccumulator()
+                                }
+                                chunk.id?.let { accum.id = it }
+                                chunk.name?.let { accum.name = it }
+                                chunk.argumentsDelta?.let { accum.arguments.append(it) }
+                            }
+                            is ParsedStreamChunk.Completed -> {
+                                // Turn finished streaming
+                            }
+                        }
+                    }
+                }.onFailure { error ->
+                    Log.e("NativeAgentRuntime", "Streaming error during turn $turnCount", error)
+                    _events.emit(RuntimeEvent.SessionFailed(sessionId, error.message ?: "Unknown error"))
+                    continueLoop = false
+                    return@withContext
+                }
+
+                val assistantMsg = JSONObject().apply {
+                    put("role", "assistant")
+                    if (assistantReplyText.isNotEmpty()) {
+                        put("content", assistantReplyText.toString())
+                    }
+                    if (toolCallsMap.isNotEmpty()) {
+                        val tcArray = JSONArray()
+                        toolCallsMap.toSortedMap().values.forEach { tc ->
+                            tcArray.put(JSONObject().apply {
+                                put("id", tc.id.ifBlank { "call_${UUID.randomUUID()}" })
+                                put("type", "function")
+                                put("function", JSONObject().apply {
+                                    put("name", tc.name)
+                                    put("arguments", tc.arguments.toString())
+                                })
+                            })
+                        }
+                        put("tool_calls", tcArray)
+                    }
+                }
+                messages.put(assistantMsg)
+
+                // If no tools were called, the agent concluded its answer
+                if (toolCallsMap.isEmpty()) {
+                    continueLoop = false
+                    break
+                }
+
+                // Execute called tools sequentially
+                for ((_, tc) in toolCallsMap.toSortedMap()) {
+                    val toolName = tc.name
+                    val rawArgs = tc.arguments.toString()
+                    _events.emit(RuntimeEvent.ToolStarted(sessionId, toolName, rawArgs.take(80)))
+
+                    val tool = toolRegistry.getTool(toolName)
+                    val toolOutput: String = if (tool == null) {
+                        "Error: Unknown tool '$toolName'"
+                    } else {
+                        val argsJson = runCatching { JSONObject(rawArgs) }.getOrElse { JSONObject() }
+                        val result = tool.execute(sessionId, projectId, argsJson)
+                        if (result.isPermissionRequired) {
+                            _events.emit(
+                                RuntimeEvent.RuntimeLog(
+                                    sessionId,
+                                    "Permission required",
+                                    "Action paused awaiting user decision",
+                                )
+                            )
+                        }
+                        if (result.success) {
+                            result.output
+                        } else {
+                            result.error ?: result.output
+                        }
+                    }
+
+                    _events.emit(RuntimeEvent.ToolCompleted(sessionId, toolName, toolOutput.take(120)))
+
+                    // Add tool result message
+                    messages.put(JSONObject().apply {
+                        put("role", "tool")
+                        put("tool_call_id", tc.id)
+                        put("name", toolName)
+                        put("content", toolOutput)
+                    })
+                }
+            }
+
+            val pending = checkpointManager.loadPendingChanges(projectId, workspace)
+            if (pending.isNotEmpty()) {
+                _events.emit(RuntimeEvent.FilesChanged(sessionId, pending))
+            }
+
+            _events.emit(RuntimeEvent.SessionCompleted(sessionId))
+            activeSessionId = null
+        } finally {
+            permissionWatcher.cancel()
+            questionWatcher.cancel()
+            permissionManager.cancelAllPending(sessionId)
+            questionManager.cancelAllPending(sessionId)
+        }
     }
 
     override suspend fun stopSession(sessionId: String) {
@@ -276,6 +291,8 @@ class NativeModelAgentRuntime(
         val id = activeSessionId
         activeSessionId = null
         if (id != null) {
+            permissionManager.cancelAllPending(id)
+            questionManager.cancelAllPending(id)
             _events.emit(RuntimeEvent.SessionCompleted(id))
         }
     }

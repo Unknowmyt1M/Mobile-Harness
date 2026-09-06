@@ -198,10 +198,6 @@ Java_com_jarves_mh_terminal_NativePty_createPty(JNIEnv *env, jobject self, jobje
         return NULL;
     }
 
-    // Set non-blocking on master
-    int flags = fcntl(ptm, F_GETFL);
-    if (flags >= 0) fcntl(ptm, F_SETFL, flags | O_NONBLOCK);
-
     jint values[2] = {ptm, (jint)pid};
     jintArray result = (*env)->NewIntArray(env, 2);
     (*env)->SetIntArrayRegion(env, result, 0, 2, values);

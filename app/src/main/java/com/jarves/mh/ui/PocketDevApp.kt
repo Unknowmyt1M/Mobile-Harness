@@ -305,6 +305,8 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onTerminalClear = viewModel::clearProjectTerminal,
             onTerminalConfirm = viewModel::confirmProjectTerminalCommand,
             onTerminalCancel = viewModel::cancelProjectTerminalCommand,
+            onTerminalSelectSession = viewModel::selectTerminalSession,
+            onTerminalNewSession = viewModel::newTerminalSession,
             onUseSuggestedProjectRoot = viewModel::useSuggestedProjectRoot,
             onExportProject = viewModel::exportActiveProject,
             onAddAttachments = viewModel::addChatAttachments,
@@ -2386,6 +2388,8 @@ private fun WorkspaceScreen(
     onTerminalClear: () -> Unit,
     onTerminalConfirm: () -> Unit,
     onTerminalCancel: () -> Unit,
+    onTerminalSelectSession: (String) -> Unit = {},
+    onTerminalNewSession: () -> Unit = {},
     onUseSuggestedProjectRoot: () -> Unit,
     onExportProject: (Uri) -> Unit,
     onAddAttachments: (List<Uri>) -> Unit,
@@ -2506,6 +2510,63 @@ private fun WorkspaceScreen(
             dismissButton = { TextButton(onClick = onTerminalCancel) { Text("Cancel") } },
         )
     }
+
+    // Global modal dialogs that persist across tab switching (Chat, Files, Terminal, Preview)
+    state.pendingPermission?.let { perm ->
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { /* Modal: user must choose an action */ },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(20.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                PermissionRequestCard(
+                    request = perm,
+                    onDecision = onPermission,
+                )
+            }
+        }
+    } ?: state.pendingApproval?.let { approvalReq ->
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { /* Modal: user must review */ },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(20.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                ApprovalCard(
+                    request = approvalReq,
+                    onApproval = onApproval,
+                )
+            }
+        }
+    }
+
+    state.pendingQuestion?.let { quest ->
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { /* Modal: question requires interaction */ },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(20.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                AgentQuestionCard(
+                    question = quest,
+                    onAnswer = onAnswerQuestion,
+                )
+            }
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -2622,6 +2683,10 @@ private fun WorkspaceScreen(
                     showThemeAction = false,
                     showQuickCommands = false,
                     compactHeader = true,
+                    sessions = state.terminalSessions,
+                    activeSession = state.activeTerminalSession,
+                    onSelectSession = onTerminalSelectSession,
+                    onNewSession = onTerminalNewSession,
                 )
                 WorkspaceTab.CHANGES -> ChangesTab(
                     state.changes,
@@ -4251,11 +4316,12 @@ private fun PreviewTab(ready: Boolean, url: String?) {
                                 loading = newProgress < 100
                             }
                         }
+                        settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                         webViewClient = object : WebViewClient() {
                             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                                 val target = request?.url ?: return true
-                                if (!target.isLoopbackPreviewUrl()) {
-                                    addressError = "External navigation is blocked in project preview"
+                                if (!target.isValidPreviewUrl()) {
+                                    addressError = "Only HTTP and HTTPS URLs are supported in preview"
                                     return true
                                 }
                                 address = target.toString()
@@ -4264,7 +4330,9 @@ private fun PreviewTab(ready: Boolean, url: String?) {
 
                             override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                                 val target = request?.url ?: return blockedPreviewResponse()
-                                return if (target.isLoopbackPreviewUrl()) null else blockedPreviewResponse()
+                                // Allow HTTP/HTTPS requests (local server, CDN fonts/scripts, remote images, APIs)
+                                // and safe browser data/blob schemas. Block local file:/content: access.
+                                return if (target.isValidPreviewUrl()) null else blockedPreviewResponse()
                             }
                         }
                         loadUrl(targetUrl)
@@ -4285,7 +4353,7 @@ private fun normalizePreviewUrl(input: String): String? {
     if (raw.isBlank()) return null
     val withScheme = if ("://" in raw) raw else "http://$raw"
     val parsed = runCatching { Uri.parse(withScheme) }.getOrNull() ?: return null
-    if (!parsed.isLoopbackPreviewUrl() || parsed.host.isNullOrBlank()) return null
+    if (!parsed.isValidPreviewUrl() || parsed.host.isNullOrBlank()) return null
     return if (parsed.host == "0.0.0.0") {
         parsed.buildUpon().encodedAuthority(
             buildString {
@@ -4297,6 +4365,10 @@ private fun normalizePreviewUrl(input: String): String? {
         parsed.toString()
     }
 }
+
+private fun Uri.isValidPreviewUrl(): Boolean =
+    scheme in setOf("data", "blob", "about") ||
+        (scheme in setOf("http", "https", "ws", "wss") && !host.isNullOrBlank())
 
 private fun Uri.isLoopbackPreviewUrl(): Boolean =
     scheme in setOf("data", "blob", "about") ||

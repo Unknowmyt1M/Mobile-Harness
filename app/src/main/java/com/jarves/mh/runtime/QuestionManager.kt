@@ -26,7 +26,7 @@ class QuestionManager(
     private val taskStore: AgentTaskStore,
     private val onEvent: suspend (RuntimeEvent) -> Unit,
 ) {
-    private val bridgeDir: File by lazy { File(context.filesDir, "runtime-bridge").apply { mkdirs() } }
+    val bridgeDir: File by lazy { File(context.filesDir, "runtime-bridge").apply { mkdirs() } }
     private val activeQuestionFiles = ConcurrentHashMap<String, File>() // questionId -> reqFile
     private val autoResolveJobs = ConcurrentHashMap<String, Job>()
     private val scope = CoroutineScope(Dispatchers.IO)
