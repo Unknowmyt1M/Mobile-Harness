@@ -13,6 +13,7 @@ import com.jarves.mh.BuildConfig
 import com.jarves.mh.data.ApiKeyVault
 import com.jarves.mh.data.AppPreferences
 import com.jarves.mh.model.ActivityItem
+import com.jarves.mh.model.AgentQuestion
 import com.jarves.mh.model.ChangeItem
 import com.jarves.mh.model.ChatMessage
 import com.jarves.mh.model.ChatAttachment
@@ -30,6 +31,7 @@ import com.jarves.mh.model.generateQuickChatIdentity
 import com.jarves.mh.network.ConnectionValidation
 import com.jarves.mh.network.ModelDiscoveryResult
 import com.jarves.mh.network.ProviderApiClient
+import com.jarves.mh.runtime.AgentOrchestrator
 import com.jarves.mh.runtime.ClaudeRuntimeBridge
 import com.jarves.mh.runtime.NativeSpawnProcess
 import com.jarves.mh.runtime.RuntimeInstallProgress
@@ -112,6 +114,8 @@ data class AppUiState(
     ),
     val pendingAttachments: List<ChatAttachment> = emptyList(),
     val pendingApproval: ToolRequest? = null,
+    val pendingPermission: com.jarves.mh.model.PermissionRequest? = null,
+    val pendingQuestion: com.jarves.mh.model.AgentQuestion? = null,
     val changes: List<ChangeItem> = emptyList(),
     val activity: List<ActivityItem> = emptyList(),
     val liveProcess: List<ActivityItem> = emptyList(),
@@ -145,7 +149,7 @@ data class AppUiState(
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val vault = ApiKeyVault(application)
     private val preferences = AppPreferences(application)
-    private val runtime = ClaudeRuntimeBridge(application) { profile -> vault.get(profile.kind.name) }
+    private val runtime = AgentOrchestrator(application, { profile -> vault.get(profile.kind.name) }, vault)
     private val installer = RuntimeInstaller(application)
     private val providerApi = ProviderApiClient()
     @Volatile private var projectTerminalProcess: Process? = null
@@ -674,6 +678,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch { RuntimeSetupController.snapshot.collect(::onSetupSnapshot) }
         viewModelScope.launch { runtime.events.collect(::onRuntimeEvent) }
+        viewModelScope.launch {
+            runtime.taskStore.pendingApprovalsFlow.collect { approvals ->
+                _state.update { current ->
+                    current.copy(pendingApproval = approvals.firstOrNull())
+                }
+            }
+        }
+        viewModelScope.launch {
+            runtime.taskStore.pendingQuestionsFlow.collect { questions ->
+                _state.update { current ->
+                    current.copy(pendingQuestion = questions.firstOrNull())
+                }
+            }
+        }
         viewModelScope.launch { bootstrap() }
     }
 
@@ -1575,6 +1593,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { runtime.respondToApproval(request, approved) }
     }
 
+    fun answerPermission(decision: com.jarves.mh.model.PermissionDecision) {
+        val request = state.value.pendingPermission ?: return
+        viewModelScope.launch {
+            runtime.respondToPermission(request.requestId, decision, request.sessionId)
+        }
+    }
+
+    fun answerQuestion(answer: com.jarves.mh.model.AgentAnswer) {
+        val question = state.value.pendingQuestion ?: return
+        viewModelScope.launch {
+            runtime.respondToQuestion(answer)
+            // Also append answered question to chat history as context
+            val displayAnswer = when {
+                answer.isCustom -> "Answer: ${answer.textValue}"
+                answer.textValue != null -> "Answer: ${answer.textValue}"
+                answer.selectedOptionIds.isNotEmpty() -> {
+                    val labels = question.options.filter { it.id in answer.selectedOptionIds }.map { it.label }
+                    "Answer: ${labels.joinToString(", ")}"
+                }
+                else -> "Answer submitted"
+            }
+            val summaryText = "💡 **Question:** ${question.question}\n$displayAnswer"
+            _state.update { current ->
+                current.copy(
+                    messages = current.messages + ChatMessage(fromUser = true, text = summaryText),
+                )
+            }
+            persistMessages()
+        }
+    }
+
     fun stopTask() {
         if (!_state.value.isRunning) return
         viewModelScope.launch { runtime.stopActiveSession() }
@@ -1808,12 +1857,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     pendingApproval = event.request,
                     activity = listOf(ActivityItem("Waiting for approval", event.request.explanation, false)) + current.activity,
                 ), ActivityItem("Waiting for approval", event.request.explanation, false))
+                is RuntimeEvent.PermissionRequested -> appendWorkItem(current.copy(
+                    pendingPermission = event.request,
+                    activity = listOf(ActivityItem("Permission required: ${event.request.capability.label}", event.request.explanation, false)) + current.activity,
+                ), ActivityItem("Permission required: ${event.request.capability.label}", event.request.explanation, false))
+                is RuntimeEvent.PermissionResolved -> appendWorkItem(current.copy(
+                    pendingPermission = null,
+                    pendingApproval = null,
+                ), ActivityItem("Permission ${event.decision.label}", "Continuing task execution", false))
+                is RuntimeEvent.QuestionRequested -> appendWorkItem(current.copy(
+                    pendingQuestion = event.question,
+                    activity = listOf(ActivityItem("Waiting for answer", event.question.question, false)) + current.activity,
+                ), ActivityItem("Question from Agent", event.question.question, false))
+                is RuntimeEvent.QuestionAnswered -> appendWorkItem(current.copy(
+                    pendingQuestion = null,
+                ), ActivityItem("Answer provided", "Continuing task execution", false))
                 is RuntimeEvent.ToolApproved -> appendWorkItem(current.copy(
                     pendingApproval = null,
+                    pendingPermission = null,
                     activity = listOf(ActivityItem("Applying approved changes", "Editing project files", false)) + current.activity,
                 ), ActivityItem("Action approved", "Claude is continuing the task", false))
                 is RuntimeEvent.ToolRejected -> appendWorkItem(current.copy(
                     pendingApproval = null,
+                    pendingPermission = null,
                 ), ActivityItem("Action rejected", "Claude will continue without this action"))
                 is RuntimeEvent.ToolCompleted -> {
                     val runningIndex = current.liveProcess.indexOfLast {

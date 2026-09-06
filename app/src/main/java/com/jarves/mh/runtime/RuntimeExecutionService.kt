@@ -49,6 +49,11 @@ class RuntimeExecutionService : Service() {
                     runningNotification(detail, includeStop = true),
                 )
             }
+            ACTION_QUESTION -> {
+                val detail = intent?.getStringExtra(EXTRA_DETAIL)?.takeIf { it.isNotBlank() }
+                    ?: "Claude Code has a question for you in $projectName"
+                notifyQuestion(detail)
+            }
             ACTION_COMPLETE -> finishTask(
                 title = "Task completed",
                 detail = intent?.getStringExtra(EXTRA_DETAIL) ?: "Mobile Harness finished working in $projectName.",
@@ -117,6 +122,20 @@ class RuntimeExecutionService : Service() {
         stopSelf()
     }
 
+    private fun notifyQuestion(detail: String) {
+        val notification = NotificationCompat.Builder(this, QUESTION_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_launcher)
+            .setContentTitle("Agent question requires input")
+            .setContentText(detail)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(detail))
+            .setContentIntent(openAppIntent())
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(QUESTION_NOTIFICATION_ID, notification)
+    }
+
     private fun openAppIntent(): PendingIntent = PendingIntent.getActivity(
         this,
         1,
@@ -149,6 +168,7 @@ class RuntimeExecutionService : Service() {
         const val ACTION_START = "com.jarves.mh.START_RUNTIME"
         const val ACTION_STOP = "com.jarves.mh.STOP_RUNTIME"
         const val ACTION_PROGRESS = "com.jarves.mh.PROGRESS_RUNTIME"
+        const val ACTION_QUESTION = "com.jarves.mh.QUESTION_RUNTIME"
         const val ACTION_COMPLETE = "com.jarves.mh.COMPLETE_RUNTIME"
         const val ACTION_FAILED = "com.jarves.mh.FAIL_RUNTIME"
         const val ACTION_CANCELLED = "com.jarves.mh.CANCEL_RUNTIME"
@@ -157,8 +177,10 @@ class RuntimeExecutionService : Service() {
 
         private const val RUNNING_CHANNEL_ID = "runtime"
         private const val RESULT_CHANNEL_ID = "task-results"
+        private const val QUESTION_CHANNEL_ID = "agent-questions"
         private const val RUNNING_NOTIFICATION_ID = 41
         private const val RESULT_NOTIFICATION_ID = 42
+        private const val QUESTION_NOTIFICATION_ID = 43
         private const val MAX_WAKE_LOCK_MS = 90 * 60 * 1_000L
 
         fun ensureNotificationChannels(context: android.content.Context) {
@@ -171,6 +193,11 @@ class RuntimeExecutionService : Service() {
             manager.createNotificationChannel(
                 NotificationChannel(RESULT_CHANNEL_ID, "Task results", NotificationManager.IMPORTANCE_DEFAULT).apply {
                     description = "Notifies you when a coding task finishes or needs attention"
+                },
+            )
+            manager.createNotificationChannel(
+                NotificationChannel(QUESTION_CHANNEL_ID, "Agent questions", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "Alerts you when the agent requires a decision to continue"
                 },
             )
         }

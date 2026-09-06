@@ -62,7 +62,7 @@ class ProviderApiClient {
         val body = validationBody(model, protocol)
         val response = request(endpoint, "POST", apiKey, body)
         when {
-            response.code in 200..299 -> ConnectionValidation.Success("Connection successful. Claude Code settings are ready.")
+            response.code in 200..299 -> ConnectionValidation.Success("Connection successful. Provider is ready.")
             response.code == 401 || response.code == 403 -> ConnectionValidation.Failure("The API key was rejected.")
             response.code == 404 -> ConnectionValidation.Failure("The API endpoint was not found. Check the base URL.")
             response.code == 400 && response.body.contains("model", ignoreCase = true) ->

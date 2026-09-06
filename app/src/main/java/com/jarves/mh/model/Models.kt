@@ -8,6 +8,20 @@ import kotlin.random.Random
 
 enum class ProviderProtocol { CLAUDE_LOGIN, ANTHROPIC, ANTHROPIC_GATEWAY, OPENAI_RESPONSES, OPENAI_CHAT }
 
+data class ModelCapabilities(
+    val supportsStreaming: Boolean = true,
+    val supportsTools: Boolean = true,
+    val supportsReasoning: Boolean = false,
+    val maxOutputTokens: Int = 4096,
+    val contextWindowTokens: Int = 128_000,
+)
+
+data class ModelProfile(
+    val id: String,
+    val displayName: String = id,
+    val capabilities: ModelCapabilities = ModelCapabilities(),
+)
+
 enum class ProviderKind(
     val title: String,
     val subtitle: String,
@@ -17,11 +31,14 @@ enum class ProviderKind(
     val experimental: Boolean = false,
 ) {
     CLAUDE("Claude subscription", "Pro, Max, Team or Enterprise", ProviderProtocol.CLAUDE_LOGIN, "", "default"),
-    ANTHROPIC("Anthropic API", "Usage billed through Console", ProviderProtocol.ANTHROPIC, "https://api.anthropic.com", "claude-sonnet-4-6"),
-    LLM_ROUTER("LLMrouter", "Use one gateway API key", ProviderProtocol.ANTHROPIC_GATEWAY, "https://proxy.llmrouter.eu", "claude-sonnet-5"),
-    OPENAI("OpenAI", "Runs through the Pocket gateway", ProviderProtocol.OPENAI_RESPONSES, "https://api.openai.com/v1", "gpt-5.4", true),
-    KIMI("Kimi", "Runs through the Pocket gateway", ProviderProtocol.OPENAI_CHAT, "https://api.moonshot.ai/v1", "kimi-k2.6", true),
-    CUSTOM("Custom API", "Anthropic-compatible endpoint", ProviderProtocol.ANTHROPIC_GATEWAY, "", "", true),
+    ANTHROPIC("Anthropic API", "Direct Anthropic API key", ProviderProtocol.ANTHROPIC, "https://api.anthropic.com", "claude-sonnet-4-6"),
+    OPENAI_RESPONSES("OpenAI Responses", "Native /v1/responses protocol", ProviderProtocol.OPENAI_RESPONSES, "https://api.openai.com/v1", "gpt-4o"),
+    OPENAI_CHAT("OpenAI Chat", "Native /v1/chat/completions protocol", ProviderProtocol.OPENAI_CHAT, "https://api.openai.com/v1", "gpt-4o"),
+    GATEWAY("Universal Gateway", "OmniRoute, OpenRouter, LiteLLM or Custom Proxy", ProviderProtocol.OPENAI_CHAT, "", "auto/best"),
+    LLM_ROUTER("LLMrouter", "Anthropic gateway proxy", ProviderProtocol.ANTHROPIC_GATEWAY, "https://proxy.llmrouter.eu", "claude-sonnet-5"),
+    OPENAI("OpenAI", "Direct OpenAI endpoint", ProviderProtocol.OPENAI_RESPONSES, "https://api.openai.com/v1", "gpt-4o"),
+    KIMI("Kimi", "Moonshot AI endpoint", ProviderProtocol.OPENAI_CHAT, "https://api.moonshot.ai/v1", "kimi-k2.6"),
+    CUSTOM("Custom Endpoint", "Custom OpenAI or Anthropic compatible server", ProviderProtocol.ANTHROPIC_GATEWAY, "", "", true),
 }
 
 data class ProviderProfile(
@@ -29,7 +46,13 @@ data class ProviderProfile(
     val baseUrl: String = kind.defaultBaseUrl,
     val model: String = kind.defaultModel,
     val hasSecret: Boolean = false,
-)
+    val customHeaders: Map<String, String> = emptyMap(),
+    val protocolOverride: ProviderProtocol? = null,
+) {
+    val activeProtocol: ProviderProtocol
+        get() = protocolOverride ?: kind.protocol
+}
+
 
 enum class ProjectKind { PROJECT, QUICK_PROJECT }
 
@@ -102,7 +125,7 @@ data class WorkspaceEntry(
     val sizeBytes: Long = 0,
 )
 
-enum class RiskLevel { SAFE, REVIEW, HIGH }
+enum class RiskLevel { SAFE, REVIEW, HIGH, BLOCKED }
 
 /**
  * Optional development toolchains the user can pick during onboarding.
@@ -149,6 +172,8 @@ data class ToolRequest(
     val affectedPaths: List<String> = emptyList(),
     val commandPreview: String? = null,
     val risk: RiskLevel,
+    val capability: CapabilityScope = CapabilityScope.PROCESS_EXECUTE,
+    val projectId: String? = null,
 )
 
 sealed interface RuntimeEvent {
@@ -175,9 +200,13 @@ sealed interface RuntimeEvent {
         val detail: String,
     ) : RuntimeEvent
     data class ToolRequested(override val sessionId: String, val request: ToolRequest) : RuntimeEvent
+    data class PermissionRequested(override val sessionId: String, val request: PermissionRequest) : RuntimeEvent
+    data class PermissionResolved(override val sessionId: String, val requestId: String, val decision: PermissionDecision) : RuntimeEvent
     data class ToolApproved(override val sessionId: String, val approvalId: String) : RuntimeEvent
     data class ToolRejected(override val sessionId: String, val approvalId: String) : RuntimeEvent
     data class ToolCompleted(override val sessionId: String, val toolName: String, val summary: String) : RuntimeEvent
+    data class QuestionRequested(override val sessionId: String, val question: AgentQuestion) : RuntimeEvent
+    data class QuestionAnswered(override val sessionId: String, val answer: AgentAnswer) : RuntimeEvent
     data class FilesChanged(override val sessionId: String, val changes: List<ChangeItem>) : RuntimeEvent {
         val paths: List<String> get() = changes.map { it.path }
     }
@@ -234,4 +263,21 @@ data class ActivityItem(
     val detail: String,
     val isComplete: Boolean = true,
     val isCommand: Boolean = false,
+)
+
+data class CheckpointMetadata(
+    val id: String,
+    val projectId: String,
+    val taskId: String? = null,
+    val label: String = "checkpoint",
+    val timestamp: Long = System.currentTimeMillis(),
+    val fileCount: Int = 0,
+    val totalBytes: Long = 0L,
+)
+
+data class DiffSummary(
+    val totalFilesChanged: Int,
+    val totalAdditions: Int,
+    val totalDeletions: Int,
+    val changes: List<ChangeItem> = emptyList(),
 )

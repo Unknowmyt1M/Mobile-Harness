@@ -633,11 +633,264 @@ class RuntimeInstaller(private val context: Context) {
         hook.parentFile?.mkdirs()
         hook.writeText(
             """#!/bin/sh
-cat > /dev/null
-printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+REQ_ID="req_${'$'}(date +%s%N 2>/dev/null || date +%s)_${'$'}${'$'}"
+REQ_FILE="/pocket-bridge/${'$'}{REQ_ID}.request"
+RESP_FILE="/pocket-bridge/${'$'}{REQ_ID}.response"
+
+cat > "${'$'}REQ_FILE"
+
+TIMEOUT=3000
+ELAPSED=0
+while [ ! -f "${'$'}RESP_FILE" ]; do
+    sleep 0.1
+    ELAPSED=${'$'}((ELAPSED + 1))
+    if [ "${'$'}ELAPSED" -ge "${'$'}TIMEOUT" ]; then
+        rm -f "${'$'}REQ_FILE" "${'$'}RESP_FILE"
+        printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","reason":"Approval timed out"}}}'
+        exit 0
+    fi
+done
+
+DECISION=${'$'}(cat "${'$'}RESP_FILE" 2>/dev/null || echo "deny")
+rm -f "${'$'}REQ_FILE" "${'$'}RESP_FILE"
+
+if [ "${'$'}DECISION" = "allow" ]; then
+    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+else
+    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","reason":"Action rejected by policy or user"}}}'
+fi
 """,
         )
         Os.chmod(hook.absolutePath, 0b111101101)
+
+        // Install ask-question CLI helper for agents and scripts
+        val askQuestionHelper = File(rootfs, "opt/pocket/ask-question")
+        askQuestionHelper.writeText(
+            """#!/bin/sh
+# ask-question CLI: Send structured question to Mobile Harness host UI and await answer
+# Usage: ask-question '{"type":"SELECT_ONE","question":"Pick database","options":[{"id":"sqlite","label":"SQLite"}]}'
+Q_PAYLOAD="${'$'}1"
+if [ -z "${'$'}Q_PAYLOAD" ]; then
+    cat > /tmp/.q_in
+    Q_PAYLOAD=${'$'}(cat /tmp/.q_in)
+fi
+
+Q_ID="q_${'$'}(date +%s%N 2>/dev/null || date +%s)_${'$'}${'$'}"
+REQ_FILE="/pocket-bridge/${'$'}{Q_ID}.request"
+RESP_FILE="/pocket-bridge/${'$'}{Q_ID}.response"
+
+printf '%s' "${'$'}Q_PAYLOAD" > "${'$'}REQ_FILE"
+
+TIMEOUT=6000
+ELAPSED=0
+while [ ! -f "${'$'}RESP_FILE" ]; do
+    sleep 0.1
+    ELAPSED=${'$'}((ELAPSED + 1))
+    if [ "${'$'}ELAPSED" -ge "${'$'}TIMEOUT" ]; then
+        rm -f "${'$'}REQ_FILE" "${'$'}RESP_FILE"
+        printf '%s\n' '{"error":"Question timed out without answer"}'
+        exit 1
+    fi
+done
+
+cat "${'$'}RESP_FILE"
+rm -f "${'$'}REQ_FILE" "${'$'}RESP_FILE"
+""",
+        )
+        Os.chmod(askQuestionHelper.absolutePath, 0b111101101)
+        val symlinkHelper = File(rootfs, "usr/local/bin/ask-question")
+        runCatching { symlinkHelper.delete(); Os.symlink("/opt/pocket/ask-question", symlinkHelper.absolutePath) }
+
+        // Install Node.js MCP Bridge for Claude Code
+        val mcpBridge = File(rootfs, "opt/pocket/mcp-pocket-bridge.js")
+        mcpBridge.writeText(
+            """const fs = require('fs');
+const readline = require('readline');
+
+// MCP Stdio Server exposing ask_question and request_permission to Claude Code
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+
+function sendResponse(response) {
+    process.stdout.write(JSON.stringify(response) + '\n');
+}
+
+function handleAskQuestion(id, params) {
+    const qPayload = params.arguments || params;
+    const reqId = "q_" + Date.now() + "_" + Math.floor(Math.random() * 10000);
+    const reqFile = "/pocket-bridge/" + reqId + ".request";
+    const respFile = "/pocket-bridge/" + reqId + ".response";
+
+    fs.writeFileSync(reqFile, JSON.stringify(qPayload));
+
+    const startTime = Date.now();
+    const timeoutMs = 360000; // 6 minutes max wait
+
+    const poll = () => {
+        if (fs.existsSync(respFile)) {
+            try {
+                const answerRaw = fs.readFileSync(respFile, 'utf8');
+                try { fs.unlinkSync(reqFile); } catch(e){}
+                try { fs.unlinkSync(respFile); } catch(e){}
+                const answer = JSON.parse(answerRaw);
+                sendResponse({
+                    jsonrpc: "2.0",
+                    id: id,
+                    result: { content: [{ type: "text", text: JSON.stringify(answer) }] }
+                });
+            } catch(err) {
+                sendResponse({
+                    jsonrpc: "2.0",
+                    id: id,
+                    result: { content: [{ type: "text", text: "Error reading answer: " + err.message }], isError: true }
+                });
+            }
+        } else if (Date.now() - startTime > timeoutMs) {
+            try { fs.unlinkSync(reqFile); } catch(e){}
+            sendResponse({
+                jsonrpc: "2.0",
+                id: id,
+                result: { content: [{ type: "text", text: "Question timed out without user answer" }], isError: true }
+            });
+        } else {
+            setTimeout(poll, 100);
+        }
+    };
+    setTimeout(poll, 50);
+}
+
+function handleRequestPermission(id, params) {
+    const pPayload = params.arguments || params;
+    const reqId = "p_" + Date.now() + "_" + Math.floor(Math.random() * 10000);
+    const reqFile = "/pocket-bridge/" + reqId + ".request";
+    const respFile = "/pocket-bridge/" + reqId + ".response";
+
+    fs.writeFileSync(reqFile, JSON.stringify(pPayload));
+
+    const startTime = Date.now();
+    const timeoutMs = 180000; // 3 minutes
+
+    const poll = () => {
+        if (fs.existsSync(respFile)) {
+            try {
+                const decision = fs.readFileSync(respFile, 'utf8').trim();
+                try { fs.unlinkSync(reqFile); } catch(e){}
+                try { fs.unlinkSync(respFile); } catch(e){}
+                sendResponse({
+                    jsonrpc: "2.0",
+                    id: id,
+                    result: { content: [{ type: "text", text: decision === "allow" ? "Permission granted" : "Permission denied" }] }
+                });
+            } catch(err) {
+                sendResponse({ jsonrpc: "2.0", id: id, error: { code: -32603, message: err.message } });
+            }
+        } else if (Date.now() - startTime > timeoutMs) {
+            try { fs.unlinkSync(reqFile); } catch(e){}
+            sendResponse({
+                jsonrpc: "2.0",
+                id: id,
+                result: { content: [{ type: "text", text: "Permission request timed out" }], isError: true }
+            });
+        } else {
+            setTimeout(poll, 100);
+        }
+    };
+    setTimeout(poll, 50);
+}
+
+rl.on('line', (line) => {
+    if (!line.trim()) return;
+    try {
+        const msg = JSON.parse(line);
+        if (msg.method === 'initialize') {
+            sendResponse({
+                jsonrpc: "2.0",
+                id: msg.id,
+                result: {
+                    protocolVersion: "2024-11-05",
+                    serverInfo: { name: "mobile-harness", version: "1.0.0" },
+                    capabilities: { tools: {} }
+                }
+            });
+        } else if (msg.method === 'notifications/initialized') {
+            // Notification, no reply needed
+        } else if (msg.method === 'tools/list') {
+            sendResponse({
+                jsonrpc: "2.0",
+                id: msg.id,
+                result: {
+                    tools: [
+                        {
+                            name: "ask_question",
+                            description: "Ask the user a structured question or choice directly in the Mobile Harness mobile UI. Use this whenever you need user clarification, input, options choice, confirmation, or credentials.",
+                            inputSchema: {
+                                type: "object",
+                                properties: {
+                                    type: {
+                                        type: "string",
+                                        enum: ["SELECT_ONE", "SELECT_MULTIPLE", "YES_NO", "TEXT", "NUMBER", "PATH", "CONFIRMATION"],
+                                        description: "Type of input requested from user"
+                                    },
+                                    question: { type: "string", description: "The question prompt to display to the user" },
+                                    title: { type: "string", description: "Short title header for the question card" },
+                                    options: {
+                                        type: "array",
+                                        items: {
+                                            type: "object",
+                                            properties: {
+                                                id: { type: "string" },
+                                                label: { type: "string" },
+                                                description: { type: "string" },
+                                                isRecommended: { type: "boolean" }
+                                            },
+                                            required: ["id", "label"]
+                                        },
+                                        description: "Options for SELECT_ONE or SELECT_MULTIPLE"
+                                    },
+                                    required: { type: "boolean", description: "Whether an answer is mandatory" },
+                                    defaultOptionId: { type: "string", description: "Default option ID if auto-resolving" },
+                                    allowCustomAnswer: { type: "boolean", description: "Whether user can type a custom answer" },
+                                    resolutionPolicy: { type: "string", enum: ["USER_REQUIRED", "AUTO_RESOLVE"], description: "AUTO_RESOLVE only for safe non-destructive defaults" }
+                                },
+                                required: ["question", "type"]
+                            }
+                        },
+                        {
+                            name: "request_permission",
+                            description: "Explicitly request user permission for security-sensitive actions such as package installation, irreversible deletions, external network operations, or project reconfigurations.",
+                            inputSchema: {
+                                type: "object",
+                                properties: {
+                                    capability: {
+                                        type: "string",
+                                        enum: ["filesystem.read", "filesystem.write", "filesystem.delete", "process.execute", "network.access", "package.install", "project.modify", "secrets.use", "external_tool.execute"]
+                                    },
+                                    explanation: { type: "string", description: "Plain explanation of why this permission is requested" },
+                                    command: { type: "string", description: "The exact command to be executed if applicable" },
+                                    affectedPaths: { type: "array", items: { type: "string" } }
+                                },
+                                required: ["capability", "explanation"]
+                            }
+                        }
+                    ]
+                }
+            });
+        } else if (msg.method === 'tools/call') {
+            const toolName = msg.params.name;
+            if (toolName === 'ask_question') {
+                handleAskQuestion(msg.id, msg.params);
+            } else if (toolName === 'request_permission') {
+                handleRequestPermission(msg.id, msg.params);
+            } else {
+                sendResponse({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Tool not found" } });
+            }
+        }
+    } catch(err) {
+        // Ignore parse error on non-json lines
+    }
+});
+""",
+        )
+        Os.chmod(mcpBridge.absolutePath, 0b111101101)
 
         val settingsContent = JSONObject()
             .put("disableAllHooks", false)
@@ -646,6 +899,15 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
                 JSONObject()
                     .put("allow", claudeWorkspaceToolRules())
                     .put("defaultMode", "acceptEdits"),
+            )
+            .put(
+                "mcpServers",
+                JSONObject().put(
+                    "mobile-harness",
+                    JSONObject()
+                        .put("command", "node")
+                        .put("args", org.json.JSONArray().put("/opt/pocket/mcp-pocket-bridge.js")),
+                ),
             )
             .put(
                 "hooks",
@@ -680,8 +942,6 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
     private fun ensureWorkspaceTrust(workspacePath: String) {
         val stateFile = File(rootfs, "root/.claude.json")
         val state = runCatching { JSONObject(stateFile.readText()) }.getOrElse { JSONObject() }
-        // Older alpha builds incorrectly wrote settings into Claude's state file.
-        // Keep Claude's generated state, but remove only those stale settings keys.
         listOf("disableAllHooks", "permissions", "hooks", "allowedTools", "autoApprove")
             .forEach(state::remove)
         val projects = state.optJSONObject("projects") ?: JSONObject()
@@ -693,10 +953,6 @@ printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decis
     }
 
     private fun claudeWorkspaceToolRules() = org.json.JSONArray().apply {
-        put("Bash")
-        put("Edit")
-        put("Write")
-        put("NotebookEdit")
         put("Read")
         put("Glob")
         put("Grep")

@@ -83,6 +83,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Key
@@ -108,8 +109,11 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import com.jarves.mh.model.RiskLevel
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
@@ -118,6 +122,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
@@ -279,6 +284,8 @@ fun PocketDevApp(viewModel: MainViewModel = viewModel()) {
             onSend = viewModel::sendPrompt,
             onStop = viewModel::stopTask,
             onApproval = viewModel::answerApproval,
+            onPermission = viewModel::answerPermission,
+            onAnswerQuestion = viewModel::answerQuestion,
             onRefreshFiles = viewModel::refreshProjectFiles,
             onOpenFile = viewModel::openFile,
             onCloseFile = viewModel::closeFile,
@@ -1536,12 +1543,8 @@ private fun ProviderSetupScreen(
                     onSelected = {
                         if (selected != it) {
                             selected = it
-                            baseUrl = if (it == ProviderKind.CUSTOM || it == ProviderKind.ANTHROPIC) {
-                                "https://api.deepseek.com/anthropic"
-                            } else {
-                                it.defaultBaseUrl
-                            }
-                            model = if (it == ProviderKind.CUSTOM) "deepseek-chat" else it.defaultModel
+                            baseUrl = it.defaultBaseUrl
+                            model = it.defaultModel
                             apiKey = ""
                         }
                     },
@@ -1719,16 +1722,20 @@ private fun ProviderChoiceRow(
     val accent = when (provider) {
         ProviderKind.CLAUDE -> Color(0xFFD97757)
         ProviderKind.ANTHROPIC -> Color(0xFFE7A26D)
+        ProviderKind.OPENAI_RESPONSES, ProviderKind.OPENAI -> Color(0xFF19A77C)
+        ProviderKind.OPENAI_CHAT -> Color(0xFF10A37F)
+        ProviderKind.GATEWAY -> Color(0xFF6366F1)
         ProviderKind.LLM_ROUTER -> Color(0xFF5B8DEF)
-        ProviderKind.OPENAI -> Color(0xFF19A77C)
         ProviderKind.KIMI -> Color(0xFF8B7CF6)
         ProviderKind.CUSTOM -> PocketOrange
     }
     val mark = when (provider) {
         ProviderKind.CLAUDE -> "C"
         ProviderKind.ANTHROPIC -> "A"
+        ProviderKind.OPENAI_RESPONSES, ProviderKind.OPENAI -> "OR"
+        ProviderKind.OPENAI_CHAT -> "OC"
+        ProviderKind.GATEWAY -> "GW"
         ProviderKind.LLM_ROUTER -> "LR"
-        ProviderKind.OPENAI -> "O"
         ProviderKind.KIMI -> "K"
         ProviderKind.CUSTOM -> "<>"
     }
@@ -2358,6 +2365,8 @@ private fun WorkspaceScreen(
     onSend: (String) -> Unit,
     onStop: () -> Unit,
     onApproval: (Boolean) -> Unit,
+    onPermission: (com.jarves.mh.model.PermissionDecision) -> Unit = {},
+    onAnswerQuestion: (com.jarves.mh.model.AgentAnswer) -> Unit,
     onRefreshFiles: () -> Unit,
     onOpenFile: (WorkspaceEntry) -> Unit,
     onCloseFile: () -> Unit,
@@ -2399,7 +2408,8 @@ private fun WorkspaceScreen(
 
     val chatItemCount = state.messages.size +
         (if (state.liveProcess.isNotEmpty() || state.liveThinking) 1 else 0) +
-        (if (state.pendingApproval != null) 1 else 0)
+        (if (state.pendingApproval != null) 1 else 0) +
+        (if (state.pendingQuestion != null) 1 else 0)
 
     LaunchedEffect(state.activeChatId) {
         userScrolledUp = false
@@ -2556,11 +2566,15 @@ private fun WorkspaceScreen(
                 WorkspaceTab.CHAT -> ChatTab(
                     state.messages,
                     state.pendingApproval,
+                    state.pendingPermission,
+                    state.pendingQuestion,
                     state.liveProcess,
                     state.isRunning,
                     onSend,
                     onStop,
                     onApproval,
+                    onPermission,
+                    onAnswerQuestion,
                     listState = chatListState,
                     taskStartedAtMillis = state.workSegmentStartedAtMillis ?: state.taskStartedAtMillis,
                     taskFinishedAtMillis = state.taskFinishedAtMillis,
@@ -2930,11 +2944,15 @@ private fun FilesTab(
 private fun ChatTab(
     messages: List<ChatMessage>,
     approval: ToolRequest?,
+    permission: com.jarves.mh.model.PermissionRequest?,
+    question: com.jarves.mh.model.AgentQuestion?,
     liveProcess: List<ActivityItem>,
     isRunning: Boolean,
     onSend: (String) -> Unit,
     onStop: () -> Unit,
     onApproval: (Boolean) -> Unit,
+    onPermission: (com.jarves.mh.model.PermissionDecision) -> Unit = {},
+    onAnswerQuestion: (com.jarves.mh.model.AgentAnswer) -> Unit,
     listState: LazyListState,
     taskStartedAtMillis: Long?,
     taskFinishedAtMillis: Long?,
@@ -2979,7 +2997,9 @@ private fun ChatTab(
                         )
                     }
                 }
-                approval?.let { request -> item { ApprovalCard(request, onApproval) } }
+                permission?.let { perm -> item { PermissionRequestCard(perm, onPermission) } }
+                    ?: approval?.let { request -> item { ApprovalCard(request, onApproval) } }
+                question?.let { q -> item { AgentQuestionCard(q, onAnswerQuestion) } }
             }
             if (!readerAtBottom) {
                 Surface(
@@ -3538,6 +3558,112 @@ private fun AttachmentChip(
 }
 
 @Composable
+private fun PermissionRequestCard(
+    request: com.jarves.mh.model.PermissionRequest,
+    onDecision: (com.jarves.mh.model.PermissionDecision) -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Shield,
+                    contentDescription = null,
+                    tint = if (request.riskLevel == RiskLevel.HIGH) MaterialTheme.colorScheme.error else PocketOrange,
+                    modifier = Modifier.size(22.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Permission Required", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                    Text(request.capability.label, fontSize = 12.sp, color = PocketOrange, fontWeight = FontWeight.SemiBold)
+                }
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = (if (request.riskLevel == RiskLevel.HIGH) MaterialTheme.colorScheme.error else PocketOrange).copy(alpha = 0.15f),
+                ) {
+                    Text(
+                        request.riskLevel.name,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (request.riskLevel == RiskLevel.HIGH) MaterialTheme.colorScheme.error else PocketOrange,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
+            }
+
+            Text(request.explanation, fontSize = 14.sp)
+
+            if (!request.command.isNullOrBlank()) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = "$ ${request.command}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(10.dp),
+                    )
+                }
+            }
+
+            if (request.affectedPaths.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Affected resources:", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    request.affectedPaths.take(5).forEach {
+                        Text("• $it", fontSize = 12.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+
+            // Exactly 4 Decisions as specified:
+            // 1. Deny once
+            // 2. Allow once
+            // 3. Allow for this project
+            // 4. Always allow
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(
+                        onClick = { onDecision(com.jarves.mh.model.PermissionDecision.DENY_ONCE) },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    ) {
+                        Text("Deny once", fontSize = 12.sp)
+                    }
+                    Button(
+                        onClick = { onDecision(com.jarves.mh.model.PermissionDecision.ALLOW_ONCE) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Allow once", fontSize = 12.sp)
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    FilledTonalButton(
+                        onClick = { onDecision(com.jarves.mh.model.PermissionDecision.ALLOW_PROJECT) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Allow for project", fontSize = 12.sp, maxLines = 1)
+                    }
+                    Button(
+                        onClick = { onDecision(com.jarves.mh.model.PermissionDecision.ALLOW_ALWAYS) },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = PocketGreen),
+                    ) {
+                        Text("Always allow", fontSize = 12.sp, maxLines = 1)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ApprovalCard(request: ToolRequest, onApproval: (Boolean) -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -3550,6 +3676,316 @@ private fun ApprovalCard(request: ToolRequest, onApproval: (Boolean) -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = { onApproval(false) }, Modifier.weight(1f)) { Text("Reject") }
                 Button(onClick = { onApproval(true) }, Modifier.weight(1f)) { Text("Allow once") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AgentQuestionCard(
+    question: com.jarves.mh.model.AgentQuestion,
+    onAnswer: (com.jarves.mh.model.AgentAnswer) -> Unit,
+) {
+    var selectedIds by rememberSaveable(question.id) {
+        mutableStateOf(question.defaultOptionId?.let { listOf(it) } ?: emptyList<String>())
+    }
+    var textInput by rememberSaveable(question.id) { mutableStateOf("") }
+    var isCustomSelected by rememberSaveable(question.id) { mutableStateOf(false) }
+    var customText by rememberSaveable(question.id) { mutableStateOf("") }
+
+    val canSubmit = when (question.type) {
+        com.jarves.mh.model.QuestionType.CONFIRMATION -> true
+        com.jarves.mh.model.QuestionType.TEXT,
+        com.jarves.mh.model.QuestionType.NUMBER,
+        com.jarves.mh.model.QuestionType.PATH -> !question.required || textInput.isNotBlank()
+        com.jarves.mh.model.QuestionType.SELECT_ONE,
+        com.jarves.mh.model.QuestionType.YES_NO -> {
+            if (isCustomSelected) customText.isNotBlank()
+            else !question.required || selectedIds.isNotEmpty()
+        }
+        com.jarves.mh.model.QuestionType.SELECT_MULTIPLE -> {
+            if (isCustomSelected) customText.isNotBlank() || selectedIds.isNotEmpty()
+            else !question.required || selectedIds.isNotEmpty()
+        }
+    }
+
+    var remainingSeconds by remember(question.id) {
+        mutableStateOf(
+            if (question.resolutionPolicy == com.jarves.mh.model.ResolutionPolicy.AUTO_RESOLVE) {
+                val elapsed = ((System.currentTimeMillis() - question.createdAt) / 1000).toInt()
+                (question.autoResolveTimeoutSeconds - elapsed).coerceAtLeast(0)
+            } else 0
+        )
+    }
+
+    LaunchedEffect(question.id, question.resolutionPolicy) {
+        if (question.resolutionPolicy == com.jarves.mh.model.ResolutionPolicy.AUTO_RESOLVE) {
+            while (remainingSeconds > 0) {
+                delay(1000)
+                remainingSeconds--
+            }
+        }
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Info, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(question.title, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                    if (question.resolutionPolicy == com.jarves.mh.model.ResolutionPolicy.AUTO_RESOLVE && remainingSeconds > 0) {
+                        val minutes = remainingSeconds / 60
+                        val secs = remainingSeconds % 60
+                        Text(
+                            text = "Auto-resolving in %d:%02d".format(minutes, secs),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = PocketOrange,
+                        )
+                    } else if (question.resolutionPolicy == com.jarves.mh.model.ResolutionPolicy.USER_REQUIRED) {
+                        Text(
+                            text = "Response required by user",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            Text(question.question, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+
+            when (question.type) {
+                com.jarves.mh.model.QuestionType.SELECT_ONE,
+                com.jarves.mh.model.QuestionType.YES_NO -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        question.options.forEach { opt ->
+                            val selected = !isCustomSelected && selectedIds.contains(opt.id)
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                ),
+                                modifier = Modifier.fillMaxWidth().clickable {
+                                    isCustomSelected = false
+                                    selectedIds = listOf(opt.id)
+                                },
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(opt.label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                            if (opt.isRecommended) {
+                                                Spacer(Modifier.width(6.dp))
+                                                Surface(
+                                                    shape = RoundedCornerShape(4.dp),
+                                                    color = PocketGreen.copy(alpha = 0.15f),
+                                                ) {
+                                                    Text(
+                                                        "(Recommended)",
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = PocketGreen,
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        if (opt.description.isNotBlank()) {
+                                            Spacer(Modifier.height(2.dp))
+                                            Text(opt.description, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    }
+                                    RadioButton(
+                                        selected = selected,
+                                        onClick = {
+                                            isCustomSelected = false
+                                            selectedIds = listOf(opt.id)
+                                        },
+                                    )
+                                }
+                            }
+                        }
+
+                        // Custom Option
+                        if (question.allowCustomAnswer) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isCustomSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isCustomSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                ),
+                                modifier = Modifier.fillMaxWidth().clickable {
+                                    isCustomSelected = true
+                                },
+                            ) {
+                                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                    ) {
+                                        Text("Custom (Type your own answer)", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                        RadioButton(
+                                            selected = isCustomSelected,
+                                            onClick = { isCustomSelected = true },
+                                        )
+                                    }
+                                    if (isCustomSelected) {
+                                        OutlinedTextField(
+                                            value = customText,
+                                            onValueChange = { customText = it },
+                                            placeholder = { Text("Write custom answer...") },
+                                            modifier = Modifier.fillMaxWidth(),
+                                            maxLines = 3,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                com.jarves.mh.model.QuestionType.SELECT_MULTIPLE -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        question.options.forEach { opt ->
+                            val selected = selectedIds.contains(opt.id)
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                ),
+                                modifier = Modifier.fillMaxWidth().clickable {
+                                    selectedIds = if (selected) selectedIds - opt.id else selectedIds + opt.id
+                                },
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(opt.label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                            if (opt.isRecommended) {
+                                                Spacer(Modifier.width(6.dp))
+                                                Surface(shape = RoundedCornerShape(4.dp), color = PocketGreen.copy(alpha = 0.15f)) {
+                                                    Text("(Recommended)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = PocketGreen, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                                }
+                                            }
+                                        }
+                                        if (opt.description.isNotBlank()) {
+                                            Spacer(Modifier.height(2.dp))
+                                            Text(opt.description, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    }
+                                    Checkbox(
+                                        checked = selected,
+                                        onCheckedChange = { isChecked ->
+                                            selectedIds = if (isChecked) selectedIds + opt.id else selectedIds - opt.id
+                                        },
+                                    )
+                                }
+                            }
+                        }
+
+                        // Custom Option in Multiple Select
+                        if (question.allowCustomAnswer) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isCustomSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surface,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isCustomSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                ),
+                                modifier = Modifier.fillMaxWidth().clickable {
+                                    isCustomSelected = !isCustomSelected
+                                },
+                            ) {
+                                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                    ) {
+                                        Text("Add custom input", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                        Checkbox(
+                                            checked = isCustomSelected,
+                                            onCheckedChange = { isCustomSelected = it },
+                                        )
+                                    }
+                                    if (isCustomSelected) {
+                                        OutlinedTextField(
+                                            value = customText,
+                                            onValueChange = { customText = it },
+                                            placeholder = { Text("Write additional answer details...") },
+                                            modifier = Modifier.fillMaxWidth(),
+                                            maxLines = 3,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                com.jarves.mh.model.QuestionType.TEXT,
+                com.jarves.mh.model.QuestionType.NUMBER,
+                com.jarves.mh.model.QuestionType.PATH -> {
+                    OutlinedTextField(
+                        value = textInput,
+                        onValueChange = { textInput = it },
+                        placeholder = {
+                            Text(
+                                when (question.type) {
+                                    com.jarves.mh.model.QuestionType.NUMBER -> "Enter number..."
+                                    com.jarves.mh.model.QuestionType.PATH -> "e.g. src/index.ts"
+                                    else -> "Type your answer..."
+                                },
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        maxLines = 4,
+                    )
+                }
+
+                com.jarves.mh.model.QuestionType.CONFIRMATION -> {
+                    Text("Please confirm to proceed with this step.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+
+            // Submit Button
+            Button(
+                onClick = {
+                    val finalAnswer = com.jarves.mh.model.AgentAnswer(
+                        questionId = question.id,
+                        taskId = question.taskId,
+                        selectedOptionIds = if (isCustomSelected && question.type != com.jarves.mh.model.QuestionType.SELECT_MULTIPLE) emptyList() else selectedIds,
+                        textValue = when {
+                            isCustomSelected -> customText.trim()
+                            textInput.isNotBlank() -> textInput.trim()
+                            else -> null
+                        },
+                        isCustom = isCustomSelected,
+                    )
+                    onAnswer(finalAnswer)
+                },
+                enabled = canSubmit,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (question.type == com.jarves.mh.model.QuestionType.CONFIRMATION) "Confirm & Continue" else "Submit Answer")
             }
         }
     }

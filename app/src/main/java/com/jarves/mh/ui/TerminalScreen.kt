@@ -29,6 +29,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.ArrowBack
@@ -107,6 +108,10 @@ fun TerminalScreen(
     showThemeAction: Boolean = false,
     showQuickCommands: Boolean = true,
     compactHeader: Boolean = false,
+    sessions: List<String> = listOf("T1"),
+    activeSession: String = "T1",
+    onSelectSession: (String) -> Unit = {},
+    onNewSession: () -> Unit = {},
 ) {
     var commandInput by remember { mutableStateOf(TextFieldValue()) }
     var commandHistory by remember { mutableStateOf(emptyList<String>()) }
@@ -261,6 +266,52 @@ fun TerminalScreen(
                 .padding(padding)
                 .imePadding(),
         ) {
+            // Horizontally scrollable session bar matching screenshot media_1788707647714.png
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                sessions.forEach { sName ->
+                    val isSelected = sName == activeSession
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent,
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                        ),
+                        modifier = Modifier.clickable { onSelectSession(sName) },
+                    ) {
+                        Text(
+                            text = sName,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                            fontSize = 12.sp,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        )
+                    }
+                }
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.clickable { onNewSession() },
+                ) {
+                    Icon(
+                        Icons.Default.Add,
+                        contentDescription = "New session",
+                        modifier = Modifier.padding(6.dp).size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+
             if (showQuickCommands) {
                 // Quick command chips are useful in the standalone terminal, but
                 // project terminal space is reserved for the actual project session.
@@ -435,39 +486,92 @@ fun TerminalScreen(
                 }
             }
 
-            // Keyboard helper row. These operate on the command draft, so they are
-            // useful even when the phone keyboard does not expose terminal keys.
-            Row(
+            // Termux-grade 2-row extra-key box immediately above IME (matching target UI layout)
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 14.dp)
-                    .padding(bottom = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                TerminalKeyButton("↑", "Previous command") {
-                    commandHistory.getOrNull(if (historyIndex < 0) commandHistory.lastIndex else (historyIndex - 1).coerceAtLeast(0))?.let {
-                        historyIndex = if (historyIndex < 0) commandHistory.lastIndex else (historyIndex - 1).coerceAtLeast(0)
-                        commandInput = TextFieldValue(it, TextRange(it.length))
+                // Row 1: ESC, /, -, HOME, ↑, END, PGUP
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    CompactKeyButton("ESC", Modifier.weight(1f)) {
+                        if (ctrlActive) ctrlActive = false
+                        if (altActive) altActive = false
+                        if (isRunning) onInput("\u001b") else commandInput = TextFieldValue()
+                    }
+                    CompactKeyButton("/", Modifier.weight(1f)) {
+                        commandInput = TextFieldValue(commandInput.text + "/", TextRange(commandInput.text.length + 1))
+                    }
+                    CompactKeyButton("-", Modifier.weight(1f)) {
+                        commandInput = TextFieldValue(commandInput.text + "-", TextRange(commandInput.text.length + 1))
+                    }
+                    CompactKeyButton("HOME", Modifier.weight(1.2f)) {
+                        commandInput = commandInput.copy(selection = TextRange(0))
+                    }
+                    CompactKeyButton("↑", Modifier.weight(1f)) {
+                        if (isRunning) {
+                            onInput("\u001b[A")
+                        } else {
+                            commandHistory.getOrNull(if (historyIndex < 0) commandHistory.lastIndex else (historyIndex - 1).coerceAtLeast(0))?.let {
+                                historyIndex = if (historyIndex < 0) commandHistory.lastIndex else (historyIndex - 1).coerceAtLeast(0)
+                                commandInput = TextFieldValue(it, TextRange(it.length))
+                            }
+                        }
+                    }
+                    CompactKeyButton("END", Modifier.weight(1.2f)) {
+                        commandInput = commandInput.copy(selection = TextRange(commandInput.text.length))
+                    }
+                    CompactKeyButton("PGUP", Modifier.weight(1.3f)) {
+                        scope.launch { terminalScrollState.animateScrollTo((terminalScrollState.value - 400).coerceAtLeast(0)) }
                     }
                 }
-                TerminalKeyButton("↓", "Next command") {
-                    if (historyIndex >= 0) {
-                        historyIndex = (historyIndex + 1).takeIf { it < commandHistory.size } ?: -1
-                        commandInput = TextFieldValue(commandHistory.getOrNull(historyIndex) ?: "", TextRange((commandHistory.getOrNull(historyIndex) ?: "").length))
+
+                // Row 2: TAB, CTRL, ALT, ←, ↓, →, PGDN
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    CompactKeyButton("TAB", Modifier.weight(1f)) {
+                        if (isRunning) onInput("\t") else commandInput = TextFieldValue(commandInput.text + "\t", TextRange(commandInput.text.length + 1))
                     }
-                }
-                TerminalIconKeyButton(Icons.Default.ArrowBack, "Move cursor left") {
-                    commandInput = commandInput.copy(selection = TextRange((commandInput.selection.start - 1).coerceAtLeast(0)))
-                }
-                TerminalIconKeyButton(Icons.Default.ArrowForward, "Move cursor right") {
-                    commandInput = commandInput.copy(selection = TextRange((commandInput.selection.end + 1).coerceAtMost(commandInput.text.length)))
-                }
-                TerminalKeyButton("ALT", "Alt modifier", active = altActive, fixedWidth = true) { altActive = !altActive }
-                TerminalKeyButton("ESC", "Escape") { commandInput = TextFieldValue() }
-                TerminalKeyButton("CTRL", "Control modifier; press C to interrupt", active = ctrlActive, fixedWidth = true) {
-                    ctrlActive = !ctrlActive
-                    if (ctrlActive) openTerminalKeyboard()
+                    CompactKeyButton(
+                        label = if (ctrlActive) "CTRL✓" else "CTRL",
+                        modifier = Modifier.weight(1.2f),
+                        isActive = ctrlActive,
+                    ) {
+                        ctrlActive = !ctrlActive
+                        if (ctrlActive) openTerminalKeyboard()
+                    }
+                    CompactKeyButton(
+                        label = if (altActive) "ALT✓" else "ALT",
+                        modifier = Modifier.weight(1.1f),
+                        isActive = altActive,
+                    ) {
+                        altActive = !altActive
+                        if (altActive) openTerminalKeyboard()
+                    }
+                    CompactKeyButton("←", Modifier.weight(1f)) {
+                        commandInput = commandInput.copy(selection = TextRange((commandInput.selection.start - 1).coerceAtLeast(0)))
+                    }
+                    CompactKeyButton("↓", Modifier.weight(1f)) {
+                        if (isRunning) {
+                            onInput("\u001b[B")
+                        } else if (historyIndex >= 0) {
+                            historyIndex = (historyIndex + 1).takeIf { it < commandHistory.size } ?: -1
+                            commandInput = TextFieldValue(commandHistory.getOrNull(historyIndex) ?: "", TextRange((commandHistory.getOrNull(historyIndex) ?: "").length))
+                        }
+                    }
+                    CompactKeyButton("→", Modifier.weight(1f)) {
+                        commandInput = commandInput.copy(selection = TextRange((commandInput.selection.end + 1).coerceAtMost(commandInput.text.length)))
+                    }
+                    CompactKeyButton("PGDN", Modifier.weight(1.3f)) {
+                        scope.launch { terminalScrollState.animateScrollTo((terminalScrollState.value + 400).coerceAtMost(terminalScrollState.maxValue)) }
+                    }
                 }
             }
         }
@@ -475,32 +579,33 @@ fun TerminalScreen(
 }
 
 @Composable
-private fun TerminalKeyButton(
+private fun CompactKeyButton(
     label: String,
-    description: String,
-    active: Boolean = false,
-    fixedWidth: Boolean = false,
+    modifier: Modifier = Modifier,
+    isActive: Boolean = false,
     onClick: () -> Unit,
 ) {
-    androidx.compose.material3.OutlinedButton(
-        onClick = onClick,
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-        modifier = Modifier.height(34.dp).then(if (fixedWidth) Modifier.width(78.dp) else Modifier),
-        colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
-            containerColor = if (active) PocketOrange.copy(alpha = 0.18f) else Color.Transparent,
-            contentColor = if (active) PocketOrange else MaterialTheme.colorScheme.onSurface,
-        ),
+    Surface(
+        modifier = modifier
+            .height(34.dp)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(6.dp),
+        color = if (isActive) PocketOrange.copy(alpha = 0.22f) else MaterialTheme.colorScheme.surface,
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
-            if (active) PocketOrange else MaterialTheme.colorScheme.outlineVariant,
+            if (isActive) PocketOrange else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
         ),
     ) {
-        Text(
-            if (active) "$label ✓" else label,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
-            maxLines = 1,
-        )
+        Box(contentAlignment = Alignment.Center) {
+            Text(
+                text = label,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                color = if (isActive) PocketOrange else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+            )
+        }
     }
 }
 
