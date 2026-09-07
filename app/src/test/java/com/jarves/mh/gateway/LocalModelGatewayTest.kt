@@ -62,4 +62,25 @@ class LocalModelGatewayTest {
         assertEquals("https://mobileharness.app", profile.customHeaders["HTTP-Referer"])
         assertEquals("Mobile Harness", profile.customHeaders["X-Title"])
     }
+
+    @Test
+    fun `gateway resolves target URL correctly for different base URLs`() {
+        fun resolveUrl(raw: String): String {
+            val normalizedBase = raw.trimEnd('/')
+            return if (normalizedBase.endsWith("/chat/completions")) {
+                normalizedBase
+            } else if (normalizedBase.endsWith("/v1")) {
+                "$normalizedBase/chat/completions"
+            } else {
+                "$normalizedBase/v1/chat/completions"
+            }
+        }
+
+        assertEquals("https://openrouter.ai/api/v1/chat/completions", resolveUrl("https://openrouter.ai/api"))
+        assertEquals("https://openrouter.ai/api/v1/chat/completions", resolveUrl("https://openrouter.ai/api/v1"))
+        assertEquals("https://openrouter.ai/api/v1/chat/completions", resolveUrl("https://openrouter.ai/api/v1/"))
+        assertEquals("https://api.openai.com/v1/chat/completions", resolveUrl("https://api.openai.com/v1"))
+        assertEquals("https://api.openai.com/v1/chat/completions", resolveUrl("https://api.openai.com/v1/chat/completions"))
+        assertEquals("http://127.0.0.1:11434/v1/chat/completions", resolveUrl("http://127.0.0.1:11434"))
+    }
 }

@@ -10,6 +10,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.HttpURLConnection
@@ -137,8 +138,10 @@ class LocalModelGateway(
             val normalizedBase = profile.baseUrl.trimEnd('/')
             val targetUrl = if (normalizedBase.endsWith("/chat/completions")) {
                 normalizedBase
-            } else {
+            } else if (normalizedBase.endsWith("/v1")) {
                 "$normalizedBase/chat/completions"
+            } else {
+                "$normalizedBase/v1/chat/completions"
             }
 
             val targetPayload = JSONObject()
@@ -149,7 +152,7 @@ class LocalModelGateway(
 
             val payloadBytes = targetPayload.toString().toByteArray(Charsets.UTF_8)
 
-            // Connect with retry logic for transient errors (429, 502, 503, 504)
+            // Connect with retry logic for transient errors (429, 502, 503, 504) and socket EOFs
             var lastResponseCode = 500
             var lastErrorText = ""
             var activeConn: HttpURLConnection? = null
@@ -160,28 +163,55 @@ class LocalModelGateway(
                     doOutput = true
                     connectTimeout = 15_000
                     readTimeout = 60_000
+                    setFixedLengthStreamingMode(payloadBytes.size)
                     setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("Accept", "text/event-stream")
+                    setRequestProperty("User-Agent", "MobileHarness/1.1")
+                    if (attempt > 1) {
+                        setRequestProperty("Connection", "close")
+                    }
+                    if (targetUrl.contains("openrouter.ai", ignoreCase = true)) {
+                        if (!profile.customHeaders.containsKey("HTTP-Referer")) {
+                            setRequestProperty("HTTP-Referer", "https://mobileharness.app")
+                        }
+                        if (!profile.customHeaders.containsKey("X-Title")) {
+                            setRequestProperty("X-Title", "Mobile Harness")
+                        }
+                    }
                     setRequestProperty("Authorization", "Bearer $apiKey")
                     profile.customHeaders.forEach { (k, v) ->
                         setRequestProperty(k, v)
                     }
                 }
 
-                conn.outputStream.use { it.write(payloadBytes) }
-                lastResponseCode = conn.responseCode
+                try {
+                    conn.outputStream.use { os ->
+                        os.write(payloadBytes)
+                        os.flush()
+                    }
+                    lastResponseCode = conn.responseCode
 
-                if (lastResponseCode in 200..299) {
-                    activeConn = conn
-                    break
-                }
+                    if (lastResponseCode in 200..299) {
+                        activeConn = conn
+                        break
+                    }
 
-                lastErrorText = conn.errorStream?.bufferedReader()?.readText().orEmpty()
-                conn.disconnect()
+                    lastErrorText = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                    conn.disconnect()
 
-                if (lastResponseCode in listOf(429, 502, 503, 504) && attempt < 3) {
-                    Thread.sleep(300L * attempt)
-                } else {
-                    break
+                    if (lastResponseCode in listOf(429, 502, 503, 504) && attempt < 3) {
+                        Thread.sleep(300L * attempt)
+                    } else {
+                        break
+                    }
+                } catch (ioe: IOException) {
+                    conn.disconnect()
+                    lastErrorText = ioe.message ?: "Connection error"
+                    if (attempt < 3) {
+                        Thread.sleep(300L * attempt)
+                    } else {
+                        break
+                    }
                 }
             }
 

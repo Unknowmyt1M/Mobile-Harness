@@ -74,18 +74,27 @@ class ProviderApiClient {
 
     private fun request(endpoint: String, method: String, apiKey: String, body: String? = null): HttpResult {
         return runCatching {
+            val bodyBytes = body?.toByteArray(Charsets.UTF_8)
             val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = method
                 connectTimeout = 12_000
                 readTimeout = 20_000
                 setRequestProperty("Accept", "application/json")
                 setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("User-Agent", "MobileHarness/1.1")
+                if (endpoint.contains("openrouter.ai", ignoreCase = true)) {
+                    setRequestProperty("HTTP-Referer", "https://mobileharness.app")
+                    setRequestProperty("X-Title", "Mobile Harness")
+                }
                 setRequestProperty("Authorization", "Bearer $apiKey")
                 setRequestProperty("x-api-key", apiKey)
                 setRequestProperty("anthropic-version", "2023-06-01")
-                if (body != null) doOutput = true
+                if (bodyBytes != null) {
+                    setFixedLengthStreamingMode(bodyBytes.size)
+                    doOutput = true
+                }
             }
-            if (body != null) connection.outputStream.use { it.write(body.toByteArray()) }
+            if (bodyBytes != null) connection.outputStream.use { it.write(bodyBytes) }
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
             val responseBody = stream?.bufferedReader()?.use { it.readText() }.orEmpty()

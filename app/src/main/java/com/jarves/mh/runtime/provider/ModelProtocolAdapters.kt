@@ -4,6 +4,7 @@ import android.util.Log
 import com.jarves.mh.model.ProviderProfile
 import com.jarves.mh.runtime.tool.ToolRegistry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -132,8 +133,8 @@ class OpenAIChatAdapter : ModelProtocolAdapter {
         }
         val payloadBytes = payload.toString().toByteArray(Charsets.UTF_8)
 
-        // Safe retry loop: max 2 attempts. ONLY retry if ZERO chunks were emitted.
-        val maxAttempts = 2
+        // Safe retry loop: max 3 attempts. ONLY retry if ZERO chunks were emitted.
+        val maxAttempts = 3
         var chunksEmittedTotal = 0
 
         for (attempt in 1..maxAttempts) {
@@ -144,8 +145,21 @@ class OpenAIChatAdapter : ModelProtocolAdapter {
                 doInput = true
                 connectTimeout = 30_000
                 readTimeout = 120_000
+                setFixedLengthStreamingMode(payloadBytes.size)
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "text/event-stream")
+                setRequestProperty("User-Agent", "MobileHarness/1.1")
+                if (attempt > 1) {
+                    setRequestProperty("Connection", "close")
+                }
+                if (endpoint.contains("openrouter.ai", ignoreCase = true)) {
+                    if (!provider.customHeaders.containsKey("HTTP-Referer")) {
+                        setRequestProperty("HTTP-Referer", "https://mobileharness.app")
+                    }
+                    if (!provider.customHeaders.containsKey("X-Title")) {
+                        setRequestProperty("X-Title", "Mobile Harness")
+                    }
+                }
                 if (apiKey.isNotBlank()) {
                     setRequestProperty("Authorization", "Bearer $apiKey")
                 }
@@ -181,6 +195,7 @@ class OpenAIChatAdapter : ModelProtocolAdapter {
                     throw e
                 }
                 Log.w("OpenAIChatAdapter", "Transient connection failure before receiving data on attempt $attempt, retrying: ${e.message}")
+                delay(200L * attempt)
             } finally {
                 conn.disconnect()
             }
@@ -220,7 +235,7 @@ class OpenAIResponsesAdapter : ModelProtocolAdapter {
         }
         val payloadBytes = payload.toString().toByteArray(Charsets.UTF_8)
 
-        val maxAttempts = 2
+        val maxAttempts = 3
         var chunksEmittedTotal = 0
 
         for (attempt in 1..maxAttempts) {
@@ -231,8 +246,21 @@ class OpenAIResponsesAdapter : ModelProtocolAdapter {
                 doInput = true
                 connectTimeout = 30_000
                 readTimeout = 120_000
+                setFixedLengthStreamingMode(payloadBytes.size)
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "text/event-stream")
+                setRequestProperty("User-Agent", "MobileHarness/1.1")
+                if (attempt > 1) {
+                    setRequestProperty("Connection", "close")
+                }
+                if (endpoint.contains("openrouter.ai", ignoreCase = true)) {
+                    if (!provider.customHeaders.containsKey("HTTP-Referer")) {
+                        setRequestProperty("HTTP-Referer", "https://mobileharness.app")
+                    }
+                    if (!provider.customHeaders.containsKey("X-Title")) {
+                        setRequestProperty("X-Title", "Mobile Harness")
+                    }
+                }
                 if (apiKey.isNotBlank()) {
                     setRequestProperty("Authorization", "Bearer $apiKey")
                 }
@@ -265,6 +293,7 @@ class OpenAIResponsesAdapter : ModelProtocolAdapter {
                     throw e
                 }
                 Log.w("OpenAIResponsesAdapter", "Transient connection failure before receiving data on attempt $attempt, retrying: ${e.message}")
+                delay(200L * attempt)
             } finally {
                 conn.disconnect()
             }
