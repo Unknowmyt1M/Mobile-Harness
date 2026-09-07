@@ -23,9 +23,10 @@ enum class CapabilityScope(val identifier: String, val label: String) {
 
 enum class PermissionDecision(val identifier: String, val label: String) {
     ALLOW_ONCE("allow_once", "Allow once"),
+    ALLOW_TASK("allow_task", "Allow for this task"),
     ALLOW_PROJECT("allow_project", "Allow for this project"),
     ALLOW_ALWAYS("allow_always", "Always allow"),
-    DENY_ONCE("deny_once", "Deny once");
+    DENY_ONCE("deny_once", "Deny");
 
     companion object {
         fun fromIdentifier(identifier: String): PermissionDecision? =

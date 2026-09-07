@@ -72,9 +72,7 @@ class BashTool(
                 )
             }
             is PolicyDecision.RequireApproval -> {
-                val reqId = "p_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
-                val permReq = PermissionRequest(
-                    requestId = reqId,
+                val permDecision = permissionManager.requestPermission(
                     sessionId = sessionId,
                     taskId = sessionId,
                     projectId = projectId.orEmpty(),
@@ -84,13 +82,14 @@ class BashTool(
                     affectedPaths = emptyList(),
                     riskLevel = decision.level,
                 )
-                return@withContext ToolExecutionResult(
-                    success = false,
-                    output = "",
-                    error = "Requires user permission (${decision.level})",
-                    isPermissionRequired = true,
-                    permissionRequestId = reqId,
-                )
+                if (permDecision == PermissionDecision.DENY_ONCE) {
+                    return@withContext ToolExecutionResult(
+                        success = false,
+                        output = "",
+                        error = "Permission denied by user for command: $command",
+                    )
+                }
+                // When approved (ALLOW_ONCE, ALLOW_PROJECT, or ALLOW_ALWAYS), proceed directly to execution
             }
             is PolicyDecision.Allow -> {
                 // Allowed to execute directly
@@ -472,56 +471,27 @@ class RequestPermissionTool(
 
     override suspend fun execute(sessionId: String, projectId: String?, arguments: JSONObject): ToolExecutionResult = withContext(Dispatchers.IO) {
         val capStr = arguments.optString("capability")
-        val cap = CapabilityScope.fromIdentifier(capStr)
-        val explanation = arguments.optString("explanation")
+        val cap = CapabilityScope.fromIdentifier(capStr) ?: CapabilityScope.PROCESS_EXECUTE
+        val explanation = arguments.optString("explanation").ifBlank { "Agent requested permission for ${cap.identifier}" }
         val command = arguments.optString("command").takeIf { it.isNotBlank() }
-        val reqId = "p_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
 
-        // Write bridge request file so PermissionManager detects it and triggers the UI permission prompt
-        val bridgeDir = permissionManager.bridgeDir
-        val reqFile = File(bridgeDir, "$reqId.request")
-        val respFile = File(bridgeDir, "$reqId.response")
+        val decision = permissionManager.requestPermission(
+            sessionId = sessionId,
+            taskId = sessionId,
+            projectId = projectId.orEmpty(),
+            capability = cap,
+            explanation = explanation,
+            command = command,
+            affectedPaths = emptyList(),
+            riskLevel = RiskLevel.REVIEW,
+        )
 
-        val reqJson = JSONObject().apply {
-            put("approvalId", reqId)
-            put("tool_name", "request_permission")
-            put("explanation", explanation)
-            put("capability", cap?.identifier ?: capStr)
-            command?.let { put("command", it) }
-            projectId?.let { put("projectId", it) }
-        }
-        reqFile.writeText(reqJson.toString())
-
-        // Suspend/poll waiting for response file written by PermissionManager.respond()
-        val timeoutMs = 600_000L // 10 minutes wait
-        val startTime = System.currentTimeMillis()
-
-        while (isActive && System.currentTimeMillis() - startTime < timeoutMs) {
-            if (respFile.exists() && respFile.length() > 0) {
-                val decision = runCatching { respFile.readText().trim().lowercase() }.getOrDefault("deny")
-                respFile.delete()
-                reqFile.delete()
-
-                val granted = decision == "allow"
-                return@withContext ToolExecutionResult(
-                    success = granted,
-                    output = if (granted) "Permission granted by user for $capStr ($explanation)" else "",
-                    error = if (!granted) "Permission denied by user for $capStr" else null,
-                    isPermissionRequired = !granted,
-                    permissionRequestId = reqId,
-                )
-            }
-            delay(100)
-        }
-
-        reqFile.delete()
-        respFile.delete()
+        val granted = decision != PermissionDecision.DENY_ONCE
         ToolExecutionResult(
-            success = false,
-            output = "",
-            error = "Permission request timed out waiting for user response",
-            isPermissionRequired = true,
-            permissionRequestId = reqId,
+            success = granted,
+            output = if (granted) "Permission granted by user for ${cap.identifier} ($explanation)" else "",
+            error = if (!granted) "Permission denied by user for ${cap.identifier}" else null,
+            isPermissionRequired = !granted,
         )
     }
 }

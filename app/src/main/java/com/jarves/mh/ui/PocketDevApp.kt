@@ -31,6 +31,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -2511,62 +2514,6 @@ private fun WorkspaceScreen(
         )
     }
 
-    // Global modal dialogs that persist across tab switching (Chat, Files, Terminal, Preview)
-    state.pendingPermission?.let { perm ->
-        androidx.compose.ui.window.Dialog(
-            onDismissRequest = { /* Modal: user must choose an action */ },
-            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(20.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                PermissionRequestCard(
-                    request = perm,
-                    onDecision = onPermission,
-                )
-            }
-        }
-    } ?: state.pendingApproval?.let { approvalReq ->
-        androidx.compose.ui.window.Dialog(
-            onDismissRequest = { /* Modal: user must review */ },
-            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(20.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                ApprovalCard(
-                    request = approvalReq,
-                    onApproval = onApproval,
-                )
-            }
-        }
-    }
-
-    state.pendingQuestion?.let { quest ->
-        androidx.compose.ui.window.Dialog(
-            onDismissRequest = { /* Modal: question requires interaction */ },
-            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(20.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                AgentQuestionCard(
-                    question = quest,
-                    onAnswer = onAnswerQuestion,
-                )
-            }
-        }
-    }
-
     Scaffold(
         topBar = {
             TopAppBar(
@@ -2697,6 +2644,19 @@ private fun WorkspaceScreen(
                 )
                 WorkspaceTab.PREVIEW -> PreviewTab(state.previewReady, state.previewUrl)
             }
+
+            AgentInteractionOverlay(
+                pendingPermission = state.pendingPermission,
+                pendingApproval = state.pendingApproval,
+                pendingQuestion = state.pendingQuestion,
+                onPermission = onPermission,
+                onApproval = onApproval,
+                onAnswerQuestion = onAnswerQuestion,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            )
         }
     }
 }
@@ -3062,9 +3022,11 @@ private fun ChatTab(
                         )
                     }
                 }
-                permission?.let { perm -> item { PermissionRequestCard(perm, onPermission) } }
-                    ?: approval?.let { request -> item { ApprovalCard(request, onApproval) } }
-                question?.let { q -> item { AgentQuestionCard(q, onAnswerQuestion) } }
+                if (permission != null || approval != null || question != null) {
+                    item {
+                        Spacer(Modifier.height(300.dp))
+                    }
+                }
             }
             if (!readerAtBottom) {
                 Surface(
@@ -3622,106 +3584,300 @@ private fun AttachmentChip(
     }
 }
 
+private data class PermissionOptionItem(
+    val number: Int,
+    val title: String,
+    val description: String,
+    val decision: com.jarves.mh.model.PermissionDecision,
+)
+
+@Composable
+private fun AgentInteractionOverlay(
+    pendingPermission: com.jarves.mh.model.PermissionRequest?,
+    pendingApproval: ToolRequest?,
+    pendingQuestion: com.jarves.mh.model.AgentQuestion?,
+    onPermission: (com.jarves.mh.model.PermissionDecision) -> Unit,
+    onApproval: (Boolean) -> Unit,
+    onAnswerQuestion: (com.jarves.mh.model.AgentAnswer) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (pendingPermission == null && pendingApproval == null && pendingQuestion == null) return
+
+    Box(
+        modifier = modifier.imePadding(),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        pendingPermission?.let { perm ->
+            PermissionRequestCard(
+                request = perm,
+                onDecision = onPermission,
+            )
+        } ?: pendingApproval?.let { approvalReq ->
+            ApprovalCard(
+                request = approvalReq,
+                onApproval = onApproval,
+            )
+        } ?: pendingQuestion?.let { quest ->
+            AgentQuestionCard(
+                question = quest,
+                onAnswer = onAnswerQuestion,
+            )
+        }
+    }
+}
+
 @Composable
 private fun PermissionRequestCard(
     request: com.jarves.mh.model.PermissionRequest,
     onDecision: (com.jarves.mh.model.PermissionDecision) -> Unit,
 ) {
+    var selectedIndex by rememberSaveable(request.requestId) { mutableIntStateOf(0) }
+
+    val options = remember(request.requestId) {
+        listOf(
+            PermissionOptionItem(
+                number = 1,
+                title = "Allow once",
+                description = "Only allow this specific action once",
+                decision = com.jarves.mh.model.PermissionDecision.ALLOW_ONCE,
+            ),
+            PermissionOptionItem(
+                number = 2,
+                title = "Allow for this task",
+                description = "Allow commands for the remainder of this task",
+                decision = com.jarves.mh.model.PermissionDecision.ALLOW_TASK,
+            ),
+            PermissionOptionItem(
+                number = 3,
+                title = "Allow for this project",
+                description = "Remember permission for this project",
+                decision = com.jarves.mh.model.PermissionDecision.ALLOW_PROJECT,
+            ),
+            PermissionOptionItem(
+                number = 4,
+                title = "Allow always",
+                description = "Always allow without prompting",
+                decision = com.jarves.mh.model.PermissionDecision.ALLOW_ALWAYS,
+            ),
+            PermissionOptionItem(
+                number = 5,
+                title = "Deny",
+                description = "Reject this permission request",
+                decision = com.jarves.mh.model.PermissionDecision.DENY_ONCE,
+            ),
+        )
+    }
+
+    val (headerIcon, headerTitle, headerSubtitle) = when (request.capability) {
+        com.jarves.mh.model.CapabilityScope.PROCESS_EXECUTE -> Triple(
+            Icons.Default.Terminal,
+            "Shell",
+            "Mobile Harness wants to execute a command",
+        )
+        com.jarves.mh.model.CapabilityScope.FILESYSTEM_READ -> Triple(
+            Icons.Default.Folder,
+            "Read",
+            "Mobile Harness wants to read workspace files",
+        )
+        com.jarves.mh.model.CapabilityScope.FILESYSTEM_WRITE -> Triple(
+            Icons.Default.Edit,
+            "Write",
+            "Mobile Harness wants to modify workspace files",
+        )
+        com.jarves.mh.model.CapabilityScope.FILESYSTEM_DELETE -> Triple(
+            Icons.Default.Delete,
+            "Delete",
+            "Mobile Harness wants to delete files in workspace",
+        )
+        else -> Triple(
+            Icons.Default.Shield,
+            request.capability.label,
+            request.explanation.ifBlank { "Mobile Harness requires your permission to proceed" },
+        )
+    }
+
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.fillMaxWidth(),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 520.dp),
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            // Header
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Default.Shield,
-                    contentDescription = null,
-                    tint = if (request.riskLevel == RiskLevel.HIGH) MaterialTheme.colorScheme.error else PocketOrange,
-                    modifier = Modifier.size(22.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("Permission Required", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-                    Text(request.capability.label, fontSize = 12.sp, color = PocketOrange, fontWeight = FontWeight.SemiBold)
-                }
                 Surface(
-                    shape = RoundedCornerShape(6.dp),
+                    shape = RoundedCornerShape(8.dp),
                     color = (if (request.riskLevel == RiskLevel.HIGH) MaterialTheme.colorScheme.error else PocketOrange).copy(alpha = 0.15f),
+                    modifier = Modifier.size(36.dp),
                 ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            headerIcon,
+                            contentDescription = null,
+                            tint = if (request.riskLevel == RiskLevel.HIGH) MaterialTheme.colorScheme.error else PocketOrange,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
                     Text(
-                        request.riskLevel.name,
-                        fontSize = 11.sp,
+                        text = headerTitle,
                         fontWeight = FontWeight.Bold,
-                        color = if (request.riskLevel == RiskLevel.HIGH) MaterialTheme.colorScheme.error else PocketOrange,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        fontSize = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
+                    Text(
+                        text = headerSubtitle,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (request.riskLevel == RiskLevel.HIGH) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
+                    ) {
+                        Text(
+                            "HIGH RISK",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
+                    }
                 }
             }
 
-            Text(request.explanation, fontSize = 14.sp)
-
+            // Command / Resource Preview box
             if (!request.command.isNullOrBlank()) {
                 Surface(
                     shape = RoundedCornerShape(8.dp),
                     color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(
-                        text = "$ ${request.command}",
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.padding(10.dp),
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "$ ${request.command}",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+            } else if (request.affectedPaths.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        request.affectedPaths.take(4).forEach { p ->
+                            Text(
+                                text = p,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 }
             }
 
-            if (request.affectedPaths.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("Affected resources:", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    request.affectedPaths.take(5).forEach {
-                        Text("• $it", fontSize = 12.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // Options List (Scrollable if needed)
+            Column(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                options.forEachIndexed { index, opt ->
+                    val isSelected = selectedIndex == index
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(
+                            width = if (isSelected) 1.5.dp else 1.dp,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { selectedIndex = index },
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.size(24.dp),
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = opt.number.toString(),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    text = opt.title,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = opt.description,
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            RadioButton(
+                                selected = isSelected,
+                                onClick = { selectedIndex = index },
+                            )
+                        }
                     }
                 }
             }
 
-            // Exactly 4 Decisions as specified:
-            // 1. Deny once
-            // 2. Allow once
-            // 3. Allow for this project
-            // 4. Always allow
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    OutlinedButton(
-                        onClick = { onDecision(com.jarves.mh.model.PermissionDecision.DENY_ONCE) },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                    ) {
-                        Text("Deny once", fontSize = 12.sp)
-                    }
-                    Button(
-                        onClick = { onDecision(com.jarves.mh.model.PermissionDecision.ALLOW_ONCE) },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("Allow once", fontSize = 12.sp)
-                    }
+            // Footer Actions
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedButton(
+                    onClick = { onDecision(com.jarves.mh.model.PermissionDecision.DENY_ONCE) },
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Text("Skip", fontSize = 13.sp)
                 }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    FilledTonalButton(
-                        onClick = { onDecision(com.jarves.mh.model.PermissionDecision.ALLOW_PROJECT) },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("Allow for project", fontSize = 12.sp, maxLines = 1)
-                    }
-                    Button(
-                        onClick = { onDecision(com.jarves.mh.model.PermissionDecision.ALLOW_ALWAYS) },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(containerColor = PocketGreen),
-                    ) {
-                        Text("Always allow", fontSize = 12.sp, maxLines = 1)
-                    }
+                Button(
+                    onClick = { onDecision(options[selectedIndex].decision) },
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Text("Submit", fontSize = 13.sp)
                 }
             }
         }
@@ -3730,17 +3886,39 @@ private fun PermissionRequestCard(
 
 @Composable
 private fun ApprovalCard(request: ToolRequest, onApproval: (Boolean) -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Warning, null, tint = PocketOrange)
-                Spacer(Modifier.width(8.dp)); Text("Review this action", fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(8.dp))
+                Text("Review Action", fontWeight = FontWeight.Bold, fontSize = 15.sp)
             }
-            Text(request.explanation)
-            request.affectedPaths.forEach { Text("• $it", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { onApproval(false) }, Modifier.weight(1f)) { Text("Reject") }
-                Button(onClick = { onApproval(true) }, Modifier.weight(1f)) { Text("Allow once") }
+            Text(request.explanation, fontSize = 13.sp)
+            if (!request.commandPreview.isNullOrBlank()) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = "$ ${request.commandPreview}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(10.dp),
+                    )
+                }
+            }
+            request.affectedPaths.take(3).forEach { Text("• $it", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                OutlinedButton(onClick = { onApproval(false) }, shape = RoundedCornerShape(10.dp)) { Text("Reject", fontSize = 13.sp) }
+                Button(onClick = { onApproval(true) }, shape = RoundedCornerShape(10.dp)) { Text("Allow once", fontSize = 13.sp) }
             }
         }
     }
@@ -3795,60 +3973,106 @@ private fun AgentQuestionCard(
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.fillMaxWidth(),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 540.dp),
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            // Header
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Info, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                Icon(
+                    Icons.Default.Info,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp),
+                )
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(question.title, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        text = question.title.ifBlank { "Agent Question" },
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
                     if (question.resolutionPolicy == com.jarves.mh.model.ResolutionPolicy.AUTO_RESOLVE && remainingSeconds > 0) {
                         val minutes = remainingSeconds / 60
                         val secs = remainingSeconds % 60
                         Text(
                             text = "Auto-resolving in %d:%02d".format(minutes, secs),
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = PocketOrange,
-                        )
-                    } else if (question.resolutionPolicy == com.jarves.mh.model.ResolutionPolicy.USER_REQUIRED) {
-                        Text(
-                            text = "Response required by user",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
             }
-            Text(question.question, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
 
-            when (question.type) {
-                com.jarves.mh.model.QuestionType.SELECT_ONE,
-                com.jarves.mh.model.QuestionType.YES_NO -> {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        question.options.forEach { opt ->
+            // Question prompt
+            Text(
+                text = question.question,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+
+            // Content body: choices or input field
+            Column(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                when (question.type) {
+                    com.jarves.mh.model.QuestionType.SELECT_ONE,
+                    com.jarves.mh.model.QuestionType.YES_NO -> {
+                        question.options.forEachIndexed { idx, opt ->
                             val selected = !isCustomSelected && selectedIds.contains(opt.id)
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
-                                color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surface,
+                                color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surface,
                                 border = BorderStroke(
-                                    1.dp,
-                                    if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                    width = if (selected) 1.5.dp else 1.dp,
+                                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
                                 ),
-                                modifier = Modifier.fillMaxWidth().clickable {
-                                    isCustomSelected = false
-                                    selectedIds = listOf(opt.id)
-                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        isCustomSelected = false
+                                        selectedIds = listOf(opt.id)
+                                    },
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(12.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
                                 ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                        modifier = Modifier.size(24.dp),
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = (idx + 1).toString(),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                    Spacer(Modifier.width(10.dp))
                                     Column(Modifier.weight(1f)) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(opt.label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                            Text(
+                                                text = opt.label,
+                                                fontWeight = FontWeight.SemiBold,
+                                                fontSize = 13.sp,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                            )
                                             if (opt.isRecommended) {
                                                 Spacer(Modifier.width(6.dp))
                                                 Surface(
@@ -3857,17 +4081,20 @@ private fun AgentQuestionCard(
                                                 ) {
                                                     Text(
                                                         "(Recommended)",
-                                                        fontSize = 11.sp,
+                                                        fontSize = 10.sp,
                                                         fontWeight = FontWeight.Bold,
                                                         color = PocketGreen,
-                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
                                                     )
                                                 }
                                             }
                                         }
                                         if (opt.description.isNotBlank()) {
-                                            Spacer(Modifier.height(2.dp))
-                                            Text(opt.description, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            Text(
+                                                text = opt.description,
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
                                         }
                                     }
                                     RadioButton(
@@ -3881,79 +4108,110 @@ private fun AgentQuestionCard(
                             }
                         }
 
-                        // Custom Option
-                        if (question.allowCustomAnswer) {
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = if (isCustomSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surface,
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isCustomSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                                ),
-                                modifier = Modifier.fillMaxWidth().clickable {
-                                    isCustomSelected = true
-                                },
-                            ) {
-                                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween,
+                        // Other / Write-in option
+                        val otherNum = question.options.size + 1
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isCustomSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(
+                                width = if (isCustomSelected) 1.5.dp else 1.dp,
+                                color = if (isCustomSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { isCustomSelected = true },
+                        ) {
+                            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = if (isCustomSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                        modifier = Modifier.size(24.dp),
                                     ) {
-                                        Text("Custom (Type your own answer)", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                                        RadioButton(
-                                            selected = isCustomSelected,
-                                            onClick = { isCustomSelected = true },
-                                        )
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = otherNum.toString(),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isCustomSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
                                     }
-                                    if (isCustomSelected) {
-                                        OutlinedTextField(
-                                            value = customText,
-                                            onValueChange = { customText = it },
-                                            placeholder = { Text("Write custom answer...") },
-                                            modifier = Modifier.fillMaxWidth(),
-                                            maxLines = 3,
-                                        )
+                                    Spacer(Modifier.width(10.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Other", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                        Text("Write custom response", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
+                                    RadioButton(
+                                        selected = isCustomSelected,
+                                        onClick = { isCustomSelected = true },
+                                    )
+                                }
+                                if (isCustomSelected) {
+                                    OutlinedTextField(
+                                        value = customText,
+                                        onValueChange = { customText = it },
+                                        placeholder = { Text("Write your response...", fontSize = 12.sp) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        maxLines = 3,
+                                    )
                                 }
                             }
                         }
                     }
-                }
 
-                com.jarves.mh.model.QuestionType.SELECT_MULTIPLE -> {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        question.options.forEach { opt ->
+                    com.jarves.mh.model.QuestionType.SELECT_MULTIPLE -> {
+                        question.options.forEachIndexed { idx, opt ->
                             val selected = selectedIds.contains(opt.id)
                             Surface(
                                 shape = RoundedCornerShape(10.dp),
-                                color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surface,
+                                color = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surface,
                                 border = BorderStroke(
-                                    1.dp,
-                                    if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                    width = if (selected) 1.5.dp else 1.dp,
+                                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
                                 ),
-                                modifier = Modifier.fillMaxWidth().clickable {
-                                    selectedIds = if (selected) selectedIds - opt.id else selectedIds + opt.id
-                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selectedIds = if (selected) selectedIds - opt.id else selectedIds + opt.id
+                                    },
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(12.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
                                 ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                        modifier = Modifier.size(24.dp),
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = (idx + 1).toString(),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                    Spacer(Modifier.width(10.dp))
                                     Column(Modifier.weight(1f)) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(opt.label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                            Text(opt.label, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                                             if (opt.isRecommended) {
                                                 Spacer(Modifier.width(6.dp))
                                                 Surface(shape = RoundedCornerShape(4.dp), color = PocketGreen.copy(alpha = 0.15f)) {
-                                                    Text("(Recommended)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = PocketGreen, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                                    Text("(Recommended)", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = PocketGreen, modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp))
                                                 }
                                             }
                                         }
                                         if (opt.description.isNotBlank()) {
-                                            Spacer(Modifier.height(2.dp))
-                                            Text(opt.description, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            Text(opt.description, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                         }
                                     }
                                     Checkbox(
@@ -3966,91 +4224,130 @@ private fun AgentQuestionCard(
                             }
                         }
 
-                        // Custom Option in Multiple Select
-                        if (question.allowCustomAnswer) {
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = if (isCustomSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surface,
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isCustomSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                                ),
-                                modifier = Modifier.fillMaxWidth().clickable {
-                                    isCustomSelected = !isCustomSelected
-                                },
-                            ) {
-                                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween,
+                        // Write-in Option in Multiple Select
+                        val otherNum = question.options.size + 1
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isCustomSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(
+                                width = if (isCustomSelected) 1.5.dp else 1.dp,
+                                color = if (isCustomSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { isCustomSelected = !isCustomSelected },
+                        ) {
+                            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = if (isCustomSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                        modifier = Modifier.size(24.dp),
                                     ) {
-                                        Text("Add custom input", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                                        Checkbox(
-                                            checked = isCustomSelected,
-                                            onCheckedChange = { isCustomSelected = it },
-                                        )
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = otherNum.toString(),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isCustomSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
                                     }
-                                    if (isCustomSelected) {
-                                        OutlinedTextField(
-                                            value = customText,
-                                            onValueChange = { customText = it },
-                                            placeholder = { Text("Write additional answer details...") },
-                                            modifier = Modifier.fillMaxWidth(),
-                                            maxLines = 3,
-                                        )
+                                    Spacer(Modifier.width(10.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Other", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                        Text("Add custom input", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
+                                    Checkbox(
+                                        checked = isCustomSelected,
+                                        onCheckedChange = { isCustomSelected = it },
+                                    )
+                                }
+                                if (isCustomSelected) {
+                                    OutlinedTextField(
+                                        value = customText,
+                                        onValueChange = { customText = it },
+                                        placeholder = { Text("Write additional details...", fontSize = 12.sp) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        maxLines = 3,
+                                    )
                                 }
                             }
                         }
                     }
-                }
 
-                com.jarves.mh.model.QuestionType.TEXT,
-                com.jarves.mh.model.QuestionType.NUMBER,
-                com.jarves.mh.model.QuestionType.PATH -> {
-                    OutlinedTextField(
-                        value = textInput,
-                        onValueChange = { textInput = it },
-                        placeholder = {
-                            Text(
-                                when (question.type) {
-                                    com.jarves.mh.model.QuestionType.NUMBER -> "Enter number..."
-                                    com.jarves.mh.model.QuestionType.PATH -> "e.g. src/index.ts"
-                                    else -> "Type your answer..."
-                                },
-                            )
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        maxLines = 4,
-                    )
-                }
+                    com.jarves.mh.model.QuestionType.TEXT,
+                    com.jarves.mh.model.QuestionType.NUMBER,
+                    com.jarves.mh.model.QuestionType.PATH -> {
+                        OutlinedTextField(
+                            value = textInput,
+                            onValueChange = { textInput = it },
+                            placeholder = {
+                                Text(
+                                    when (question.type) {
+                                        com.jarves.mh.model.QuestionType.NUMBER -> "Enter number..."
+                                        com.jarves.mh.model.QuestionType.PATH -> "e.g. src/index.ts"
+                                        else -> "Type your answer..."
+                                    },
+                                    fontSize = 12.sp,
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            maxLines = 4,
+                        )
+                    }
 
-                com.jarves.mh.model.QuestionType.CONFIRMATION -> {
-                    Text("Please confirm to proceed with this step.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    com.jarves.mh.model.QuestionType.CONFIRMATION -> {
+                        Text("Please confirm to proceed with this step.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
 
-            // Submit Button
-            Button(
-                onClick = {
-                    val finalAnswer = com.jarves.mh.model.AgentAnswer(
-                        questionId = question.id,
-                        taskId = question.taskId,
-                        selectedOptionIds = if (isCustomSelected && question.type != com.jarves.mh.model.QuestionType.SELECT_MULTIPLE) emptyList() else selectedIds,
-                        textValue = when {
-                            isCustomSelected -> customText.trim()
-                            textInput.isNotBlank() -> textInput.trim()
-                            else -> null
-                        },
-                        isCustom = isCustomSelected,
-                    )
-                    onAnswer(finalAnswer)
-                },
-                enabled = canSubmit,
+            // Footer Actions
+            Row(
                 modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(if (question.type == com.jarves.mh.model.QuestionType.CONFIRMATION) "Confirm & Continue" else "Submit Answer")
+                OutlinedButton(
+                    onClick = {
+                        onAnswer(
+                            com.jarves.mh.model.AgentAnswer(
+                                questionId = question.id,
+                                taskId = question.taskId,
+                                selectedOptionIds = emptyList(),
+                                isCustom = true,
+                                textValue = "Cancelled by user",
+                            )
+                        )
+                    },
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Text("Skip", fontSize = 13.sp)
+                }
+                Button(
+                    onClick = {
+                        val finalAnswer = com.jarves.mh.model.AgentAnswer(
+                            questionId = question.id,
+                            taskId = question.taskId,
+                            selectedOptionIds = if (isCustomSelected && question.type != com.jarves.mh.model.QuestionType.SELECT_MULTIPLE) emptyList() else selectedIds,
+                            textValue = when {
+                                isCustomSelected -> customText.trim()
+                                textInput.isNotBlank() -> textInput.trim()
+                                else -> null
+                            },
+                            isCustom = isCustomSelected,
+                        )
+                        onAnswer(finalAnswer)
+                    },
+                    enabled = canSubmit,
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Text(if (question.type == com.jarves.mh.model.QuestionType.CONFIRMATION) "Confirm" else "Submit", fontSize = 13.sp)
+                }
             }
         }
     }
