@@ -204,39 +204,64 @@ class LocalModelGateway(
 
             val streamReader = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8))
             var streamLine: String?
-            while (streamReader.readLine().also { streamLine = it } != null) {
-                val line = streamLine?.trim().orEmpty()
-                if (line.startsWith("data: ")) {
-                    val data = line.removePrefix("data: ").trim()
-                    if (data == "[DONE]") break
-                    val deltaJson = runCatching { JSONObject(data) }.getOrNull()
-
-                    // Check for token usage stats
-                    val usageObj = deltaJson?.optJSONObject("usage")
-                    if (usageObj != null) {
-                        val promptTokens = usageObj.optLong("prompt_tokens", 0)
-                        val completionTokens = usageObj.optLong("completion_tokens", 0)
-                        val totalTokens = usageObj.optLong("total_tokens", 0)
-                        synchronized(usage) {
-                            usage.promptTokens += promptTokens
-                            usage.completionTokens += completionTokens
-                            usage.totalTokens += totalTokens
-                            usage.requestCount++
-                            usage.estimatedCostUsd += GatewayCostCalculator.calculateCost(model, promptTokens, completionTokens)
+            var doneReceived = false
+            try {
+                while (true) {
+                    val readResult = runCatching { streamReader.readLine() }
+                    if (readResult.isFailure) {
+                        val error = readResult.exceptionOrNull()
+                        if (doneReceived) {
+                            Log.d("LocalModelGateway", "Upstream socket closed after [DONE]: ${error?.message}")
+                            break
+                        } else {
+                            throw error ?: java.io.IOException("Stream ended prematurely before [DONE]")
                         }
                     }
+                    streamLine = readResult.getOrNull()
+                    if (streamLine == null) break
 
-                    val choices = deltaJson?.optJSONArray("choices")
-                    val delta = choices?.optJSONObject(0)?.optJSONObject("delta")
-                    val contentPiece = delta?.optString("content").orEmpty()
-                    if (contentPiece.isNotEmpty()) {
-                        val anthropicDelta = JSONObject()
-                            .put("type", "content_block_delta")
-                            .put("index", 0)
-                            .put("delta", JSONObject().put("type", "text_delta").put("text", contentPiece))
-                        writeSse(clientOut, "content_block_delta", anthropicDelta.toString())
+                    val line = streamLine.trim()
+                    if (line.startsWith("data: ")) {
+                        val data = line.removePrefix("data: ").trim()
+                        if (data == "[DONE]") {
+                            doneReceived = true
+                            break
+                        }
+                        val deltaJson = runCatching { JSONObject(data) }.getOrNull()
+
+                        // Check for token usage stats
+                        val usageObj = deltaJson?.optJSONObject("usage")
+                        if (usageObj != null) {
+                            val promptTokens = usageObj.optLong("prompt_tokens", 0)
+                            val completionTokens = usageObj.optLong("completion_tokens", 0)
+                            val totalTokens = usageObj.optLong("total_tokens", 0)
+                            synchronized(usage) {
+                                usage.promptTokens += promptTokens
+                                usage.completionTokens += completionTokens
+                                usage.totalTokens += totalTokens
+                                usage.requestCount++
+                                usage.estimatedCostUsd += GatewayCostCalculator.calculateCost(model, promptTokens, completionTokens)
+                            }
+                        }
+
+                        val choices = deltaJson?.optJSONArray("choices")
+                        val delta = choices?.optJSONObject(0)?.optJSONObject("delta")
+                        val contentPiece = delta?.optString("content").orEmpty()
+                        if (contentPiece.isNotEmpty()) {
+                            val anthropicDelta = JSONObject()
+                                .put("type", "content_block_delta")
+                                .put("index", 0)
+                                .put("delta", JSONObject().put("type", "text_delta").put("text", contentPiece))
+                            writeSse(clientOut, "content_block_delta", anthropicDelta.toString())
+                        }
                     }
                 }
+            } finally {
+                runCatching { streamReader.close() }
+            }
+
+            if (!doneReceived) {
+                throw java.io.IOException("Stream from upstream ended prematurely without [DONE]")
             }
 
             writeSse(clientOut, "content_block_stop", "{\"type\":\"content_block_stop\",\"index\":0}")
