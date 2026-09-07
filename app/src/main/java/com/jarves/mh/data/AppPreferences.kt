@@ -8,6 +8,7 @@ import com.jarves.mh.model.ProjectKind
 import com.jarves.mh.model.ProjectChat
 import com.jarves.mh.model.ProviderKind
 import com.jarves.mh.model.ProviderProfile
+import com.jarves.mh.model.ProviderProtocol
 import com.jarves.mh.model.projectSlug
 import org.json.JSONArray
 import org.json.JSONObject
@@ -62,17 +63,22 @@ class AppPreferences(private val context: Context) {
             .putString("provider_kind", profile.kind.name)
             .putString("provider_base_url", profile.baseUrl)
             .putString("provider_model", profile.model)
+            .putString("provider_protocol_override", profile.protocolOverride?.name)
             .apply()
     }
 
     fun loadProvider(vault: ApiKeyVault): ProviderProfile {
         val kind = runCatching { ProviderKind.valueOf(preferences.getString("provider_kind", null).orEmpty()) }
             .getOrDefault(ProviderKind.ANTHROPIC)
+        val protocolOverride = preferences.getString("provider_protocol_override", null)?.let {
+            runCatching { ProviderProtocol.valueOf(it) }.getOrNull()
+        }
         return ProviderProfile(
             kind = kind,
             baseUrl = preferences.getString("provider_base_url", kind.defaultBaseUrl) ?: kind.defaultBaseUrl,
             model = preferences.getString("provider_model", kind.defaultModel) ?: kind.defaultModel,
             hasSecret = vault.contains(kind.name),
+            protocolOverride = protocolOverride,
         )
     }
 

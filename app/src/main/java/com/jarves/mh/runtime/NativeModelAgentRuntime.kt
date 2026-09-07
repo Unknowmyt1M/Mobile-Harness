@@ -120,32 +120,18 @@ class NativeModelAgentRuntime(
                 workspace = workspace,
             )
 
-            val messages = JSONArray()
-            // 1. System instruction
             val systemPrompt = """
                 You are Mobile Harness, an expert autonomous mobile software engineering agent.
                 You are working in an Ubuntu 20.04 ARM64 environment inside the project directory: /workspace/$projectSlug
                 You have access to tools to inspect files, edit code, execute bash commands, ask the user questions, and request permissions.
                 Be concise, direct, and verify your changes carefully.
             """.trimIndent()
-            messages.put(JSONObject().apply {
-                put("role", "system")
-                put("content", systemPrompt)
-            })
 
-            // 2. Add history (bounded to last 10 messages for context budget)
-            conversationHistory.takeLast(10).forEach { msg ->
-                messages.put(JSONObject().apply {
-                    put("role", if (msg.fromUser) "user" else "assistant")
-                    put("content", msg.text)
-                })
-            }
-
-            // 3. Add current user prompt
-            messages.put(JSONObject().apply {
-                put("role", "user")
-                put("content", prompt)
-            })
+            val messages = buildSanitizedMessages(
+                systemPrompt = systemPrompt,
+                conversationHistory = conversationHistory,
+                currentPrompt = prompt,
+            )
 
             val adapter: ModelProtocolAdapter = when (provider.activeProtocol) {
                 ProviderProtocol.OPENAI_RESPONSES -> responsesAdapter
@@ -200,12 +186,19 @@ class NativeModelAgentRuntime(
                     put("role", "assistant")
                     if (assistantReplyText.isNotEmpty()) {
                         put("content", assistantReplyText.toString())
+                    } else if (toolCallsMap.isNotEmpty()) {
+                        put("content", JSONObject.NULL)
+                    } else {
+                        put("content", "Done.")
                     }
                     if (toolCallsMap.isNotEmpty()) {
                         val tcArray = JSONArray()
                         toolCallsMap.toSortedMap().values.forEach { tc ->
+                            if (tc.id.isBlank()) {
+                                tc.id = "call_${UUID.randomUUID().toString().replace("-", "").take(9)}"
+                            }
                             tcArray.put(JSONObject().apply {
-                                put("id", tc.id.ifBlank { "call_${UUID.randomUUID()}" })
+                                put("id", tc.id)
                                 put("type", "function")
                                 put("function", JSONObject().apply {
                                     put("name", tc.name)
@@ -259,7 +252,7 @@ class NativeModelAgentRuntime(
                         put("role", "tool")
                         put("tool_call_id", tc.id)
                         put("name", toolName)
-                        put("content", toolOutput)
+                        put("content", if (toolOutput.isBlank()) "Success" else toolOutput)
                     })
                 }
             }
@@ -294,6 +287,80 @@ class NativeModelAgentRuntime(
             permissionManager.cancelAllPending(id)
             questionManager.cancelAllPending(id)
             _events.emit(RuntimeEvent.SessionCompleted(id))
+        }
+    }
+
+    companion object {
+        fun buildSanitizedMessages(
+            systemPrompt: String,
+            conversationHistory: List<ChatMessage>,
+            currentPrompt: String,
+            maxHistoryMessages: Int = 10,
+        ): JSONArray {
+            val messages = JSONArray()
+            messages.put(JSONObject().apply {
+                put("role", "system")
+                put("content", systemPrompt.trim())
+            })
+
+            // 1. Filter out empty/blank messages (such as dummy work segment markers with text = "")
+            val nonEmptyHistory = conversationHistory.filter { it.text.isNotBlank() }
+
+            // 2. Exclude current prompt if it is already the last message in history
+            // (e.g. MainViewModel appends ChatMessage(fromUser=true, text=prompt) before calling startSession)
+            val historyWithoutCurrent = if (nonEmptyHistory.isNotEmpty() &&
+                nonEmptyHistory.last().let { it.fromUser && it.text.trim() == currentPrompt.trim() }
+            ) {
+                nonEmptyHistory.dropLast(1)
+            } else {
+                nonEmptyHistory
+            }
+
+            // 3. Drop leading assistant messages (e.g. default greeting "Hi! Tell me what you want to build or change.")
+            // Protocol requirement for Anthropic/Claude & OpenAI proxies: first conversational message MUST be user!
+            val historyFromFirstUser = historyWithoutCurrent.dropWhile { !it.fromUser }
+
+            // 4. Bounded to recent history budget
+            var boundedHistory = historyFromFirstUser.takeLast(maxHistoryMessages)
+            // Ensure after taking last N that it still starts with a user message
+            boundedHistory = boundedHistory.dropWhile { !it.fromUser }
+
+            // 5. Merge consecutive messages with the same role to strictly enforce alternating user -> assistant -> user
+            val alternatingHistory = mutableListOf<Pair<String, String>>()
+            for (msg in boundedHistory) {
+                val role = if (msg.fromUser) "user" else "assistant"
+                val text = msg.text.trim()
+                if (alternatingHistory.isNotEmpty() && alternatingHistory.last().first == role) {
+                    val prev = alternatingHistory.removeAt(alternatingHistory.lastIndex)
+                    alternatingHistory.add(Pair(role, "${prev.second}\n\n$text"))
+                } else {
+                    alternatingHistory.add(Pair(role, text))
+                }
+            }
+
+            // 6. Append sanitized alternating history to messages
+            for ((role, text) in alternatingHistory) {
+                messages.put(JSONObject().apply {
+                    put("role", role)
+                    put("content", text)
+                })
+            }
+
+            // 7. Add current user prompt
+            val promptText = currentPrompt.trim().ifBlank { "Continue" }
+            if (alternatingHistory.isNotEmpty() && alternatingHistory.last().first == "user") {
+                val lastIdx = messages.length() - 1
+                val lastObj = messages.getJSONObject(lastIdx)
+                val combined = "${lastObj.getString("content")}\n\n$promptText"
+                lastObj.put("content", combined)
+            } else {
+                messages.put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", promptText)
+                })
+            }
+
+            return messages
         }
     }
 }

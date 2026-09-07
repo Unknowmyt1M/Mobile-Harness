@@ -1,5 +1,7 @@
 package com.jarves.mh.runtime.provider
 
+import com.jarves.mh.model.ChatMessage
+import com.jarves.mh.runtime.NativeModelAgentRuntime
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -191,5 +193,104 @@ class ModelProtocolAdaptersTest {
         val completion = received.filterIsInstance<ParsedStreamChunk.Completed>()
         assertEquals(1, completion.size)
         assertEquals("tool_calls", completion[0].finishReason)
+    }
+
+    @Test
+    fun `test buildSanitizedMessages on new chat drops leading assistant greeting and avoids duplicate prompt`() {
+        val greeting = ChatMessage(fromUser = false, text = "Hi! Tell me what you want to build or change.")
+        val prompt = "Create a counter app"
+        // MainViewModel adds the user prompt to state.messages before calling startSession
+        val userMsgInHistory = ChatMessage(fromUser = true, text = prompt)
+        val history = listOf(greeting, userMsgInHistory)
+
+        val messages = NativeModelAgentRuntime.buildSanitizedMessages(
+            systemPrompt = "You are an agent",
+            conversationHistory = history,
+            currentPrompt = prompt,
+        )
+
+        // Must have exactly:
+        // index 0: system
+        // index 1: user ("Create a counter app")
+        // NO leading assistant greeting, NO duplicate user prompt!
+        assertEquals(2, messages.length())
+        val sysObj = messages.getJSONObject(0)
+        assertEquals("system", sysObj.getString("role"))
+        assertEquals("You are an agent", sysObj.getString("content"))
+
+        val userObj = messages.getJSONObject(1)
+        assertEquals("user", userObj.getString("role"))
+        assertEquals("Create a counter app", userObj.getString("content"))
+    }
+
+    @Test
+    fun `test buildSanitizedMessages on second message filters blank work segments and merges correctly`() {
+        val prompt1 = "Create a counter"
+        val history = listOf(
+            ChatMessage(fromUser = false, text = "Hi! Tell me what you want to build or change."),
+            ChatMessage(fromUser = true, text = prompt1),
+            ChatMessage(fromUser = false, text = "", workItems = listOf()), // dummy work segment marker
+            ChatMessage(fromUser = false, text = "I created the counter for you."),
+            ChatMessage(fromUser = true, text = "Now add a reset button"), // current prompt in history
+        )
+
+        val currentPrompt = "Now add a reset button"
+        val messages = NativeModelAgentRuntime.buildSanitizedMessages(
+            systemPrompt = "System instruction",
+            conversationHistory = history,
+            currentPrompt = currentPrompt,
+        )
+
+        // Expected sequence:
+        // 0: system
+        // 1: user ("Create a counter")
+        // 2: assistant ("I created the counter for you.")
+        // 3: user ("Now add a reset button")
+        assertEquals(4, messages.length())
+
+        assertEquals("system", messages.getJSONObject(0).getString("role"))
+
+        assertEquals("user", messages.getJSONObject(1).getString("role"))
+        assertEquals("Create a counter", messages.getJSONObject(1).getString("content"))
+
+        assertEquals("assistant", messages.getJSONObject(2).getString("role"))
+        assertEquals("I created the counter for you.", messages.getJSONObject(2).getString("content"))
+
+        assertEquals("user", messages.getJSONObject(3).getString("role"))
+        assertEquals("Now add a reset button", messages.getJSONObject(3).getString("content"))
+    }
+
+    @Test
+    fun `test buildSanitizedMessages merges consecutive same-role messages for strict alternating roles`() {
+        val history = listOf(
+            ChatMessage(fromUser = true, text = "Part 1 of my question"),
+            ChatMessage(fromUser = true, text = "Part 2 of my question"),
+            ChatMessage(fromUser = false, text = "Answer part 1"),
+            ChatMessage(fromUser = false, text = "Answer part 2"),
+        )
+
+        val messages = NativeModelAgentRuntime.buildSanitizedMessages(
+            systemPrompt = "System",
+            conversationHistory = history,
+            currentPrompt = "Final question",
+        )
+
+        // Expected sequence:
+        // 0: system
+        // 1: user ("Part 1 of my question\n\nPart 2 of my question")
+        // 2: assistant ("Answer part 1\n\nAnswer part 2")
+        // 3: user ("Final question")
+        assertEquals(4, messages.length())
+
+        assertEquals("system", messages.getJSONObject(0).getString("role"))
+
+        assertEquals("user", messages.getJSONObject(1).getString("role"))
+        assertEquals("Part 1 of my question\n\nPart 2 of my question", messages.getJSONObject(1).getString("content"))
+
+        assertEquals("assistant", messages.getJSONObject(2).getString("role"))
+        assertEquals("Answer part 1\n\nAnswer part 2", messages.getJSONObject(2).getString("content"))
+
+        assertEquals("user", messages.getJSONObject(3).getString("role"))
+        assertEquals("Final question", messages.getJSONObject(3).getString("content"))
     }
 }

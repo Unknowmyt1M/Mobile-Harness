@@ -145,8 +145,8 @@ class OpenAIChatAdapter : ModelProtocolAdapter {
                 doInput = true
                 connectTimeout = 30_000
                 readTimeout = 120_000
-                setFixedLengthStreamingMode(payloadBytes.size)
                 setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Content-Length", payloadBytes.size.toString())
                 setRequestProperty("Accept", "text/event-stream")
                 setRequestProperty("User-Agent", "MobileHarness/1.1")
                 if (attempt > 1) {
@@ -173,7 +173,16 @@ class OpenAIChatAdapter : ModelProtocolAdapter {
                     os.flush()
                 }
 
-                val responseCode = conn.responseCode
+                val responseCode = try {
+                    conn.responseCode
+                } catch (e: IOException) {
+                    val errBody = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }.getOrNull()
+                    if (!errBody.isNullOrBlank()) {
+                        throw RuntimeException("Gateway connection error: $errBody", e)
+                    }
+                    throw e
+                }
+
                 if (responseCode !in 200..299) {
                     val errorBody = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
                     throw RuntimeException("HTTP $responseCode from model gateway: $errorBody")
@@ -190,8 +199,9 @@ class OpenAIChatAdapter : ModelProtocolAdapter {
                 // If we reach here successfully, break out of retry loop
                 break
             } catch (e: Exception) {
-                // If chunks were already emitted, DO NOT RETRY to prevent duplicate/split output
-                if (chunksEmittedTotal > 0 || attempt >= maxAttempts) {
+                // If chunks were already emitted or if it's an HTTP 4xx client/validation error, DO NOT RETRY
+                val isClientError = e.message?.contains("HTTP 4") == true
+                if (chunksEmittedTotal > 0 || isClientError || attempt >= maxAttempts) {
                     throw e
                 }
                 Log.w("OpenAIChatAdapter", "Transient connection failure before receiving data on attempt $attempt, retrying: ${e.message}")
@@ -246,8 +256,8 @@ class OpenAIResponsesAdapter : ModelProtocolAdapter {
                 doInput = true
                 connectTimeout = 30_000
                 readTimeout = 120_000
-                setFixedLengthStreamingMode(payloadBytes.size)
                 setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Content-Length", payloadBytes.size.toString())
                 setRequestProperty("Accept", "text/event-stream")
                 setRequestProperty("User-Agent", "MobileHarness/1.1")
                 if (attempt > 1) {
@@ -273,7 +283,16 @@ class OpenAIResponsesAdapter : ModelProtocolAdapter {
                     os.flush()
                 }
 
-                val responseCode = conn.responseCode
+                val responseCode = try {
+                    conn.responseCode
+                } catch (e: IOException) {
+                    val errBody = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }.getOrNull()
+                    if (!errBody.isNullOrBlank()) {
+                        throw RuntimeException("Gateway connection error: $errBody", e)
+                    }
+                    throw e
+                }
+
                 if (responseCode !in 200..299) {
                     val errorBody = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
                     throw RuntimeException("HTTP $responseCode from responses endpoint: $errorBody")
@@ -289,7 +308,9 @@ class OpenAIResponsesAdapter : ModelProtocolAdapter {
                 )
                 break
             } catch (e: Exception) {
-                if (chunksEmittedTotal > 0 || attempt >= maxAttempts) {
+                // If chunks were already emitted or if it's an HTTP 4xx client/validation error, DO NOT RETRY
+                val isClientError = e.message?.contains("HTTP 4") == true
+                if (chunksEmittedTotal > 0 || isClientError || attempt >= maxAttempts) {
                     throw e
                 }
                 Log.w("OpenAIResponsesAdapter", "Transient connection failure before receiving data on attempt $attempt, retrying: ${e.message}")
